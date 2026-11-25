@@ -1,7 +1,8 @@
 # Ricoh GDI status protocol (GDIC / GDIR)
 
 Status reporting for the Ricoh SP 211 over USB, as implemented by
-[`ricoh_gdi_status.py`](../ricoh_gdi_status.py).
+[`tools/ricoh_gdi_status.py`](../tools/ricoh_gdi_status.py) and, for toner
+and page counter, by `src/sp211_status.c` and `src/sp211_usb.c`.
 
 **Scope.** Everything here was observed on one printer: Ricoh SP 211,
 USB `05ca:0450`, firmware V1.06. The SP 210 shares the Windows driver and
@@ -26,7 +27,7 @@ handlers read the line and discard it.
 - The printer also answers the empty command (`"GDIC"` + 12 spaces) and most
   unrecognised writes with the same packet.
 - While it holds a job it sends `GDIR` packets on its own every few seconds.
-  CUPS forwards them to filters on the back-channel (fd 3).
+  A program that prints can read them on the bulk IN endpoint.
 - The first query after claiming the interface sometimes gets no reply; retry.
 
 ## GDIR packet layout
@@ -104,8 +105,8 @@ print engine and takes about 3 s.
 | `0x27` | `0x2A` | an 11-character alphanumeric identifier | not attributed |
 
 Control requests do not need the printer interface, so the counter can be
-read without detaching anything. Whether it can be read while CUPS is in the
-middle of a job has not been tried.
+read without detaching anything. Reading registers 1 and 3 two seconds before
+a job did not disturb it; reading them while a job prints has not been tried.
 
 Partly understood, not used by the tool:
 
@@ -166,6 +167,18 @@ register `0x27`, the engine firmware version was not found.
   printed. Sent as `"GDIC CANCEL    ÿ"` on a held job, it had no effect.
   A held job was only cleared by power cycling the printer.
 
+### Zero-length transfers wedge the printer
+
+A zero-length bulk OUT transfer (USB ZLP) sent before or inside a job leaves
+the printer stuck: it takes the job data, warms up, prints nothing, does not
+list the job in its job log (registers `0x10`-`0x23`), and then accepts no
+more data on endpoint `0x03` (transfers time out) until it is switched off
+and on. The same job without the zero-length transfer prints every time.
+PAPPL up to 1.4.12 sends one when `papplDeviceWrite()` is given more than its
+8 KB buffer while the buffer is empty
+([PAPPL issue #434](https://github.com/michaelrsweet/pappl/issues/434));
+`sp211-printer-app` writes in 2 KB pieces to avoid it.
+
 ### The other channel: `@SDC_SET`
 
 Ricoh's Smart Organizing Monitor changes settings with a text command that
@@ -205,89 +218,34 @@ If the printer interface is busy, it still prints toner and page counter
 (read through the vendor registers) and reports paper and job state as
 unknown. It exits with status 2 if the printer cannot be opened at all.
 
-CUPS integration, as a wrapper around the existing raster filter:
-
-```
-sudo ./enable_gdi_status.sh PRINTER             # enable for one CUPS queue
-sudo ./enable_gdi_status.sh --disable PRINTER   # put the original PPD back
-./enable_gdi_status.sh --status PRINTER
-```
-
-The script installs the wrapper as the CUPS filter `ricohgdiwrap` and as the
-command `ricoh-gdi-status`, saves the queue's PPD, and replaces its raster
-filter line with:
-
-```
-*cupsFilter: "application/vnd.cups-raster 100 ricohgdiwrap"
-*ricohGdiRealFilter: "rastertolilo"
-```
-
-It needs Ricoh's `rastertolilo` filter to be installed already; this project
-does not ship it.
-
-During each job the wrapper reports `marker-levels` (toner) and
-`media-empty-error` to CUPS. On a paper error it keeps the job active until
-the error clears, so the queue shows the problem instead of an apparently
-finished job.
-
 ### Jobs held without an error: missing paper size
 
-Ricoh's `rastertolilo` loads the PPD with `cupsGetPPD()`, which fails on
-current CUPS ("No PPD file!" on stderr). When the job carries no explicit
-`PageSize`/`InputSlot`, it then writes paper code `0xFE` and tray `0` in the
-`GDIP` header. A printer loaded with A4 keeps such a job (job flag 1, memory
-reserved, no red LED) until Start is pressed.
-
-The wrapper therefore appends the PPD defaults for every option the job does
-not set. With `PageSize=A4 InputSlot=Tray1` the header carries `09`/`02`.
-Confirmed on paper: with the defaults added, a CUPS job printed on its own
-and the printer returned to idle (job flag 0, `VSTATUS:IDLE`). Without them,
-every job stayed held.
-
-### What reaches CUPS
-
-At every job the wrapper reads the printer and hands the result to CUPS,
-which keeps it while the printer is off:
-
-| Information | Where in CUPS | Checked |
-|---|---|---|
-| toner level, toner low | `marker-levels`, `toner-low-warning` | level: yes; low warning: never triggered |
-| out of paper | `media-empty-error` | replayed packets only |
-| total page counter, misfeeds | `marker-message`, e.g. `page-counter=190;misfeeds=6;misfeeds-tray1=6` | yes |
-| pages printed by the job | job accounting (`job-impressions-completed`) | yes: 2 for a 2-page job, 1 for a 1-page job |
-
-`marker-message` is free text; CUPS has no attribute for a lifetime counter
-and this is the only free field a filter can set. The pages of a job are the
-difference of the printer's counter before and after it, so they are the
-pages that really came out. Ricoh's filter alone reports none (CUPS showed 0).
-
-The wrapper keeps the job "processing" until the printer reports it done.
-
-**Printer switched off.** CUPS holds the job ("Waiting for printer to become
-available") and the wrapper waits with it. Tested: job submitted with the
-printer off, printed about 30 s after power-on, counter and page accounting
-correct. CUPS only learns new values when a job runs; for anything else read
-the printer directly with `ricoh-gdi-status`.
+When the `GDIP` page header carries paper code `0xFE` (unspecified) and tray
+`0`, a printer loaded with A4 keeps the job (job flag 1, memory reserved, no
+red LED) until Start is pressed. With `09`/`02` (A4, tray 1) the same job
+prints on its own and the printer returns to idle (job flag 0,
+`VSTATUS:IDLE`). `sp211-printer-app` always sets both, from the size of the
+page received and the printer's default tray.
 
 ### Automatic updates
 
 The printer sends its `GDIR` packet by itself every 3.5 s as long as the bulk
 IN endpoint is being read (measured: 13 packets in 40 s with nothing sent).
-Listening to that stream needs the printer interface, which CUPS needs
-exclusively to print, so a permanent listener would block printing.
+Listening to that stream needs the printer interface, which printing needs
+exclusively, so a permanent listener would block printing.
 
-The registers do not need the interface. `ricoh-gdi-status --watch [SECONDS]`
+The registers do not need the interface. `ricoh_gdi_status.py --watch [SECONDS]`
 polls them and prints one JSON line only when toner, page counter, misfeeds
 or the on/off state change:
 
 ```
-$ ricoh-gdi-status --watch 30
+$ ./ricoh_gdi_status.py --watch 30
 {"toner_black_percent": 75, "page_counter": 187, "misfeed_total": 6, "misfeed_tray1": 6, "firmware": "V1.06", "online": true, "time": "2026-11-25T12:06:18"}
 ```
 
 Pipe it to whatever should be notified (MQTT publisher, webhook, log).
 Paper state is not part of it: it is only known from the `GDIR` packet.
-Running `--watch` while a CUPS job prints has not been tested.
+Running `--watch` while a job prints has not been tested.
 
 Tests: `python3 tests/test_gdi_status.py` (uses packets captured from the
 printer; no hardware needed).

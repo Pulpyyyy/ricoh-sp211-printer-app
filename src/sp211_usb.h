@@ -10,7 +10,7 @@
  *
  * The reply is built asynchronously: until it is ready the read returns
  * zeros, so it is polled. Control requests do not need the printer
- * interface, which CUPS holds while it prints.
+ * interface, which the print job holds while it prints.
  *
  * Built without libusb (HAVE_LIBUSB undefined), the function below returns 0
  * and the driver simply reports no counters.
@@ -23,7 +23,7 @@
 /* Reads the page counter and toner level (and, if want_misfeeds, the misfeed
  * counters, which takes about 3 s more).
  *
- * device_uri: the CUPS device URI ("usb://RICOH/SP%20211?serial=XXXX") used
+ * device_uri: the printer's USB device URI ("usb://RICOH/SP%20211?serial=XXXX") used
  * to pick the right printer when several are connected; may be NULL.
  *
  * Returns 1 if the page counter was read, 0 if the printer could not be
@@ -31,7 +31,7 @@
  * for more than a few seconds. */
 int sp211_usb_read_counters(const char *device_uri, int want_misfeeds, sp211_counters *out);
 
-/* Extracts the serial number from a CUPS USB device URI. Returns 1 and fills
+/* Extracts the serial number from a USB device URI. Returns 1 and fills
  * serial (NUL terminated) if the URI has one. Exposed for the tests. */
 int sp211_usb_uri_serial(const char *device_uri, char *serial, size_t size);
 

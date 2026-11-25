@@ -3,11 +3,10 @@
  * sp211_status - printer status of the Ricoh SP 211 class GDI printers.
  *
  * While it holds a job (and whenever it is asked with "GDIC GDIR"), the
- * printer sends a 64-byte "GDIR" packet on its USB bulk IN endpoint. CUPS
- * hands those bytes to filters on the back-channel. This module decodes the
- * packets and turns them into CUPS "ATTR:" / "STATE:" messages.
+ * printer sends a 64-byte "GDIR" packet on its USB bulk IN endpoint. This
+ * module decodes those packets and the printer's counter registers.
  *
- * No CUPS or USB dependency; see docs/STATUS_PROTOCOL.md for the layout and
+ * No USB dependency; see docs/STATUS_PROTOCOL.md for the layout and
  * how each field was established.
  */
 #ifndef SP211_STATUS_H
@@ -15,7 +14,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
 
 #define SP211_GDIR_LEN 64
 #define SP211_TONER_LOW_PERCENT 10
@@ -71,45 +69,5 @@ void sp211_counters_init(sp211_counters *c);
 int sp211_decode_register1(const unsigned char *reg, size_t n, sp211_counters *c);
 int sp211_decode_register3(const unsigned char *reg, size_t n, sp211_counters *c);
 int sp211_decode_misfeeds(const unsigned char *reg, size_t n, sp211_counters *c);
-
-/* Text for the CUPS "marker-message" attribute, for example
- * "page-counter=193;misfeeds=6;misfeeds-tray1=6". CUPS has no attribute for a
- * lifetime counter and this is the only free-text field a filter can set.
- * Returns the length written (0 if nothing is known). */
-size_t sp211_counters_message(const sp211_counters *c, char *buf, size_t bufsize);
-
-/* Pages that physically came out during a job, from the counter before and
- * after it. 0 if unknown or implausible. */
-unsigned sp211_pages_printed(const sp211_counters *before, const sp211_counters *after);
-
-/* Writes CUPS messages to out, only when something changed. */
-typedef struct {
-  FILE *out;
-  int toner;     /* last known, -1 = none yet */
-  int toner_low; /* -1 = none yet */
-  int paper_out; /* -1 = none yet */
-  char message[96];      /* last known counters text */
-  int sent_toner;        /* what the last ATTR line carried */
-  char sent_message[96];
-} sp211_reporter;
-
-void sp211_reporter_init(sp211_reporter *r, FILE *out);
-void sp211_report(sp211_reporter *r, const sp211_status *st);
-/* Counters (and the toner level, if not known yet) from the registers. */
-void sp211_report_counters(sp211_reporter *r, const sp211_counters *c);
-/* Job accounting: "PAGE: total N". Nothing if pages is 0. */
-void sp211_report_pages(sp211_reporter *r, unsigned pages);
-
-/* After all data is sent: should the filter stay alive? Staying alive keeps
- * the CUPS job "processing" until the printer is really done, so a paper
- * error stays visible instead of the job completing silently.
- * st may be NULL (no packet received yet). Times are in seconds. */
-#define SP211_WAIT_START_SECONDS 20   /* for the printer to start the job */
-#define SP211_WAIT_SILENCE_SECONDS 15 /* printer stopped talking */
-#define SP211_WAIT_MAX_SECONDS 1800
-/* waiting_for_power: the printer has never answered and cannot be reached,
- * so it is switched off and CUPS is holding the job; wait with it. */
-int sp211_keep_waiting(double elapsed, double silence, const sp211_status *st,
-                       int seen_active, int waiting_for_power);
 
 #endif

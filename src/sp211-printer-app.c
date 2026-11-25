@@ -38,17 +38,17 @@
 #define DRIVER_DESC "Ricoh SP 211"
 #define DEVICE_ID "MFG:RICOH;MDL:SP 211;"
 
-/* 12 pt margins on every side, as in the PPD: hundredths of mm and 600 dpi pixels */
+/* 12 pt margins on every side, as in the original CUPS driver: hundredths of mm and 600 dpi pixels */
 #define MARGIN_HMM 423
 #define MARGIN_PX 100
 #define RESOLUTION 600
 
 typedef struct {
   const char *ipp; /* IPP keyword */
-  const char *ppd; /* PPD keyword, which the lilo2 helpers know */
+  const char *ppd; /* keyword of the original driver's PPD, which the lilo2 helpers take */
 } map_t;
 
-/* Sizes of the PPD that the printer accepts, with their IPP names. */
+/* Paper sizes the printer accepts, with their IPP names. */
 static const map_t sizes[] = {
   {"iso_a4_210x297mm", "A4"},       {"na_letter_8.5x11in", "Letter"},
   {"na_legal_8.5x14in", "Legal"},   {"iso_a5_148x210mm", "A5"},
@@ -120,8 +120,7 @@ static bool sp211_rstartjob(pappl_job_t *job, pappl_pr_options_t *options,
   papplJobSetData(job, jd);
 
   lilo2_job hdr = {0};
-  /* PAPPL sends each page once; the printer makes the copies, as with the
-   * CUPS filter. */
+  /* PAPPL sends each page once; the printer makes the copies itself. */
   hdr.copies = options->copies > 0 ? options->copies : 1;
   hdr.title = papplJobGetName(job);
   hdr.user = papplJobGetUsername(job);
