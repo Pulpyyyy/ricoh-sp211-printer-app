@@ -60,6 +60,7 @@ typedef struct {
   char cert_file[512], key_file[512]; /* client certificate, optional */
   char username[128], password[128];
   char prefix[128];       /* discovery prefix */
+  bool discovery;         /* announce the device to Home Assistant */
   char base[256];         /* base topic */
   char web_url[512];
   char settings_file[1024];
@@ -519,8 +520,14 @@ static void on_connect(struct mosquitto *mosq, void *data, int rc) {
   m->backoff = 0;
   snprintf(topic, sizeof topic, "%s/set/+", m->base);
   mosquitto_subscribe(mosq, NULL, topic, 1);
-  snprintf(topic, sizeof topic, "%s/status", m->prefix);
-  mosquitto_subscribe(mosq, NULL, topic, 1); /* Home Assistant restarted */
+  if (m->discovery) {
+    snprintf(topic, sizeof topic, "%s/status", m->prefix);
+    mosquitto_subscribe(mosq, NULL, topic, 1); /* Home Assistant restarted */
+  } else {
+    /* an empty retained message removes a device announced before */
+    snprintf(topic, sizeof topic, "%s/device/%s/config", m->prefix, m->uid);
+    mosquitto_publish(mosq, NULL, topic, 0, NULL, 1, true);
+  }
   snprintf(topic, sizeof topic, "%s/availability", m->base);
   publish(m, topic, "online", true);
   m->republish = true;
@@ -532,10 +539,6 @@ static void on_disconnect(struct mosquitto *mosq, void *data, int rc) {
   if (m->connected)
     papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: disconnected (%s).", mosquitto_strerror(rc));
   m->connected = false;
-}
-
-static bool payload_on(const char *p) {
-  return !strcasecmp(p, "ON") || !strcmp(p, "1") || !strcasecmp(p, "true");
 }
 
 static void on_message(struct mosquitto *mosq, void *data, const struct mosquitto_message *msg) {
@@ -558,30 +561,36 @@ static void on_message(struct mosquitto *mosq, void *data, const struct mosquitt
   if (strncmp(msg->topic, m->base, blen) || strncmp(msg->topic + blen, "/set/", 5)) return;
   const char *what = msg->topic + blen + 5;
   time_t now = time(NULL);
+  int on = sp211_parse_bool(payload, -1); /* ON/OFF, yes/no, true/false, 1/0; -1 otherwise */
 
-  if (!strcmp(what, "power")) {
-    sp211_power_set(&m->power, payload_on(payload), now);
-  } else if (!strcmp(what, "auto_on")) {
-    m->power.auto_on = payload_on(payload);
+  if (!strcmp(what, "power") && on >= 0) {
+    sp211_power_set(&m->power, on, now);
+  } else if (!strcmp(what, "auto_on") && on >= 0) {
+    m->power.auto_on = on;
     save_settings(m);
-  } else if (!strcmp(what, "auto_off")) {
-    m->power.auto_off = payload_on(payload);
+  } else if (!strcmp(what, "auto_off") && on >= 0) {
+    m->power.auto_off = on;
     save_settings(m);
   } else if (!strcmp(what, "delay")) {
     char *end;
     double v = strtod(payload, &end);
-    if (end == payload) return;
+    while (*end == ' ') end++;
+    if (end == payload || *end) goto ignored;
     m->power.delay_min = sp211_power_clamp_delay((long)(v + 0.5));
     save_settings(m);
-  } else if (!strcmp(what, "print")) {
-    if (!strcmp(payload, "test")) papplCopyString(m->page_request, SP211_PAGE_TEST, sizeof m->page_request);
-    else if (!strcmp(payload, "maintenance"))
-      papplCopyString(m->page_request, SP211_PAGE_MAINTENANCE, sizeof m->page_request);
-    else return;
+  } else if (!strcmp(what, "print") && !strcmp(payload, "test")) {
+    papplCopyString(m->page_request, SP211_PAGE_TEST, sizeof m->page_request);
+  } else if (!strcmp(what, "print") && !strcmp(payload, "maintenance")) {
+    papplCopyString(m->page_request, SP211_PAGE_MAINTENANCE, sizeof m->page_request);
   } else {
-    return;
+    goto ignored;
   }
-  m->republish = true; /* answer at the next tick: Home Assistant waits for the new state */
+  m->republish = true; /* answer at the next tick: the sender waits for the new state */
+  return;
+
+ignored:
+  papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: ignored %s=\"%s\" (see docs/MQTT.md).", msg->topic,
+           payload);
 }
 
 /* Lower-case letters, digits and underscores: a valid MQTT topic level and
@@ -732,13 +741,15 @@ static void *mqtt_thread(void *data) {
     build_state(m, printer, &state);
     if (m->connected) {
       char topic[sizeof m->base + 16];
-      sp211_app_status st;
-      sp211_app_get_status(&st);
-      sp211_buf disc = {0};
-      build_discovery(m, st.firmware, &disc);
-      snprintf(topic, sizeof topic, "%s/device/%s/config", m->prefix, m->uid);
-      publish_if_changed(m, topic, &disc, &m->last_discovery);
-      sp211_buf_free(&disc);
+      if (m->discovery) {
+        sp211_app_status st;
+        sp211_app_get_status(&st);
+        sp211_buf disc = {0};
+        build_discovery(m, st.firmware, &disc);
+        snprintf(topic, sizeof topic, "%s/device/%s/config", m->prefix, m->uid);
+        publish_if_changed(m, topic, &disc, &m->last_discovery);
+        sp211_buf_free(&disc);
+      }
       snprintf(topic, sizeof topic, "%s/state", m->base);
       publish_if_changed(m, topic, &state, &m->last_state);
       m->republish = false;
@@ -821,6 +832,14 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
   if ((v = getenv("MQTT_PASSWORD")) != NULL) papplCopyString(m->password, v, sizeof m->password);
   papplCopyString(m->prefix, (v = getenv("MQTT_DISCOVERY_PREFIX")) && *v ? v : "homeassistant",
                   sizeof m->prefix);
+  int discovery = sp211_parse_bool(getenv("MQTT_DISCOVERY"), 1);
+  if (discovery < 0) {
+    papplLog(system, PAPPL_LOGLEVEL_ERROR, "MQTT: MQTT_DISCOVERY=\"%s\" is not valid (yes or no); MQTT is off.",
+             getenv("MQTT_DISCOVERY"));
+    free(m);
+    return;
+  }
+  m->discovery = discovery;
   papplCopyString(m->settings_file, settings_file, sizeof m->settings_file);
   sp211_power_init(&m->power);
   load_settings(m);
@@ -833,9 +852,10 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
     return;
   }
   pthread_detach(tid);
-  papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s, user %s%s.", m->broker,
+  papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s, user %s%s%s.", m->broker,
            m->username[0] ? m->username : "(none)",
-           !m->tls ? "" : m->tls_insecure ? ", TLS without name check" : ", TLS");
+           !m->tls ? "" : m->tls_insecure ? ", TLS without name check" : ", TLS",
+           m->discovery ? "" : ", no Home Assistant discovery");
 }
 
 #endif /* HAVE_MOSQUITTO */

@@ -12,10 +12,11 @@
 # (it then cannot contain a single quote). Remove the "#" in front of a line
 # to use it. Details: /usr/share/doc/sp211-printer-app/MQTT.md
 #
-# ---- MQTT for Home Assistant ---------------------------------------------
-# Publishes the printer as a Home Assistant device (state, toner, counters,
-# jobs, test pages, and a power switch that a plug can follow). Off while
-# MQTT_HOST is not set; printing does not need it.
+# ---- MQTT ---------------------------------------------------------------------
+# Publishes the printer's state (toner, counters, jobs, power for a plug)
+# and takes commands (test pages, power settings), for any MQTT client;
+# Home Assistant also gets the device by discovery. Off while MQTT_HOST is
+# not set; printing does not need it.
 #
 # Broker: a name, an IPv4 address, or an IPv6 address in brackets; may be
 # followed by :PORT and preceded by mqtt:// or mqtts:// (TLS).
@@ -45,9 +46,15 @@
 # yes: do not check that the broker's certificate names MQTT_HOST.
 #MQTT_TLS_INSECURE=no
 #
-# ---- Rarely needed ---------------------------------------------------------
+# ---- Home Assistant -----------------------------------------------------------
+# Discovery messages that create the device in Home Assistant. no: none
+# (for another system), and a device announced before is removed.
+#MQTT_DISCOVERY=yes
+#
 # Home Assistant's discovery prefix, if changed in its MQTT integration.
 #MQTT_DISCOVERY_PREFIX=homeassistant
+#
+# ---- Rarely needed ---------------------------------------------------------
 #
 # Base of the printer's topics. Default: sp211-printer-app/<printer name>.
 #MQTT_TOPIC=sp211-printer-app/sp211

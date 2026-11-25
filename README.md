@@ -11,10 +11,10 @@ Home Assistant print to it and read its status without any driver.
   `marker-levels`), toner low and empty, the printer's own page counter
   (`printer-impressions-completed`), its firmware version, and "stopped"
   while the printer cannot be reached.
-- **Publishes the printer to Home Assistant over MQTT** (optional): jobs,
-  counters, misfeeds, test pages, and a power switch that a smart plug can
-  follow, to switch the printer on when a document arrives and off when it
-  has been idle.
+- **Publishes the printer over MQTT** (optional), for any MQTT client, with
+  Home Assistant discovery: jobs, counters, misfeeds, test pages, and a
+  power state that a smart plug can follow, to switch the printer on when a
+  document arrives and off when it has been idle.
 - **Runs as a service** on a small Linux machine with the printer on USB, for
   example a Proxmox LXC container.
 
@@ -87,6 +87,17 @@ device files also need permissions that the container's root can use. This
 LXC setup has **not been tested yet** (the tests ran in an existing container
 that already had the printer).
 
+### MQTT
+
+Set the broker in `/etc/default/sp211-printer-app` (`MQTT_HOST`, and
+`MQTT_USERNAME`, `MQTT_PASSWORD` if it asks for a login) and restart the
+service. The printer's state is then published on
+`sp211-printer-app/NAME/state` (JSON), commands are taken on
+`sp211-printer-app/NAME/set/...`, and any MQTT client can use them: Home
+Assistant, Node-RED, openHAB, Jeedom, a script. Plain MQTT or MQTT over
+TLS. [docs/MQTT.md](docs/MQTT.md) describes every setting, topic, field and
+command.
+
 ### Home Assistant
 
 Home Assistant's IPP integration finds the printer by itself, or can be
@@ -100,9 +111,9 @@ pointed at host `HOST`, port `631`, path `/ipp/print/SP211`. It shows:
 - the printer's firmware first in the device's firmware field, followed by
   the versions of this application and of its libraries (PAPPL adds those).
 
-That is all the IPP integration reads. For more, enable MQTT: set the
-broker in `/etc/default/sp211-printer-app` and restart the service. The
-printer then also appears as a device of the MQTT integration, with:
+That is all the IPP integration reads. For more, enable MQTT (above): with
+MQTT discovery, the printer then also appears by itself as a device of the
+MQTT integration, with:
 
 - the current job, the jobs waiting, and the last job with its time and
   result;
@@ -168,8 +179,8 @@ including in its own messages; printing is not affected.
 - [docs/STATUS_PROTOCOL.md](docs/STATUS_PROTOCOL.md): the status packet, the
   counter registers, the printer's job log, and what is known not to work,
   including the zero-length transfer above.
-- [docs/MQTT.md](docs/MQTT.md): MQTT settings, the plug, entities and
-  topics.
+- [docs/MQTT.md](docs/MQTT.md): MQTT settings, topics, state fields and
+  commands, the plug, and Home Assistant (discovery, entities, blueprint).
 
 ## License
 
