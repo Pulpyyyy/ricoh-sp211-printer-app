@@ -79,6 +79,13 @@ echo /etc/default/$NAME > "$STAGE/DEBIAN/conffiles"
 cat > "$STAGE/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
 set -e
+# PAPPL keeps its self-signed TLS certificate (IPPS, HTTPS) where CUPS would,
+# in /etc/cups/ssl; without CUPS installed the directory does not exist and
+# every encrypted connection fails with "Unable to create server credentials".
+if [ "$1" = configure ]; then
+  install -d -m 755 /etc/cups
+  install -d -m 700 /etc/cups/ssl
+fi
 if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   systemctl enable sp211-printer-app.service
