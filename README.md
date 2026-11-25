@@ -22,6 +22,25 @@ version of CUPS", in favour of printer applications like this one.
 
 ## Install
 
+### From the package (Debian 13, amd64 or arm64)
+
+Download `sp211-printer-app_VERSION_ARCH.deb` from the
+[releases](https://github.com/Pulpyyyy/ricoh-sp211-printer-app/releases)
+(or, for the latest commit, from the artifacts of the "Package" workflow),
+then, with the printer on USB:
+
+```
+sudo apt install ./sp211-printer-app_*.deb
+sudo sp211-printer-app add -d SP211 -m ricoh_sp211 \
+     -v "$(sp211-printer-app devices | grep -m1 -o 'usb://RICOH[^ ]*')"
+```
+
+`apt` installs the libraries it needs (PAPPL, libusb) and the package starts
+the service. The packages are built by GitHub Actions in a Debian 13
+container, with the tests run before packaging (`packaging/build-deb.sh`).
+
+### From source
+
 On Debian 13 (or Ubuntu), with the printer on USB:
 
 ```
