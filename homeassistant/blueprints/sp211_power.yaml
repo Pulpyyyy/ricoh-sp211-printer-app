@@ -1,29 +1,28 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 blueprint:
-  name: SP 211 – prise de l'imprimante
+  name: SP 211 – printer plug
   description: >-
-    Relie une prise connectée à l'imprimante Ricoh SP 211 publiée par
-    sp211-printer-app (MQTT). L'application décide quand l'imprimante doit
-    être allumée : à l'arrivée d'un document, et éteinte après le délai
-    d'inactivité choisi (réglages « Auto power on », « Auto power off » et
-    « Power-off delay » de l'appareil, ou dans la carte). Cette automatisation
-    applique ses demandes à la prise et, dans l'autre sens, lui signale quand
-    la prise est allumée ou éteinte autrement (à la main, par une autre
-    automatisation). N'importe quelle prise de type interrupteur convient.
+    Links a smart plug to the Ricoh SP 211 published by sp211-printer-app
+    (MQTT). The printer application decides when the printer must be on: when
+    a document arrives, and off after the chosen idle delay (settings "Auto
+    power on", "Auto power off" and "Power-off delay" of the device, or in
+    the card). This automation applies its requests to the plug and, the
+    other way round, tells it when the plug is switched on or off by other
+    means (by hand, by another automation). Any plug shown as a switch works.
   domain: automation
   source_url: https://github.com/Pulpyyyy/ricoh-sp211-printer-app/blob/main/homeassistant/blueprints/sp211_power.yaml
   input:
     printer_power:
-      name: Imprimante
-      description: L'interrupteur « Power » de l'appareil SP 211 (intégration MQTT).
+      name: Printer
+      description: The "Power" switch of the SP 211 device (MQTT integration).
       selector:
         entity:
           filter:
             - domain: switch
               integration: mqtt
     plug:
-      name: Prise
-      description: La prise sur laquelle l'imprimante est branchée.
+      name: Plug
+      description: The plug the printer is plugged into.
       selector:
         entity:
           filter:
