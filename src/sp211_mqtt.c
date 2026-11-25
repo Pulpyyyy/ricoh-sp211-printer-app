@@ -100,7 +100,12 @@ typedef struct {
     char text[320];
   } logq[16];             /* log messages of the MQTT thread */
   int logq_n, logq_lost;
+  bool stop_req;          /* the process ends: say "offline" and disconnect */
+  bool stopped;           /* done */
+  pthread_cond_t stop_cond;
 } mqtt_t;
+
+static mqtt_t *running_mqtt; /* for stop_at_exit() */
 
 /* ---- settings ------------------------------------------------------------ */
 
@@ -519,8 +524,9 @@ static void build_discovery(mqtt_t *m, const char *firmware, sp211_buf *b) {
  * The thread below never calls PAPPL: PAPPL may be shutting down, or not
  * running yet, at any moment. It only talks to the broker, publishes what
  * mqtt_timer() prepared, hands the commands it receives to mqtt_timer(), and
- * leaves its log messages to it. When the process ends, the broker publishes
- * the last will ("offline"). */
+ * leaves its log messages to it. When the process ends, stop_at_exit() has
+ * it publish "offline" and disconnect; the last will ("offline" too) only
+ * covers a crash or a lost connection. */
 
 /* Queues a log message; mqtt_timer() writes it to PAPPL's log. */
 static void tlog(mqtt_t *m, pappl_loglevel_t level, const char *fmt, ...)
@@ -725,12 +731,33 @@ static void publish_if_changed(mqtt_t *m, const char *topic, const char *text, c
   *last = strdup(text);
 }
 
+/* The process ends: publish "offline" and disconnect cleanly (the broker
+ * then drops the last will, which only covers crashes and lost
+ * connections), then tell stop_at_exit(). */
+static void say_goodbye(mqtt_t *m) {
+  if (m->mosq && m->connected) {
+    char topic[sizeof m->base + 16];
+    snprintf(topic, sizeof topic, "%s/availability", m->base);
+    mosquitto_publish(m->mosq, NULL, topic, 7, "offline", 1, true);
+    mosquitto_disconnect(m->mosq);
+    for (int i = 0; i < 10 && mosquitto_want_write(m->mosq); i++) mosquitto_loop(m->mosq, 50, 1);
+  }
+  pthread_mutex_lock(&m->lock);
+  m->stopped = true;
+  pthread_cond_signal(&m->stop_cond);
+  pthread_mutex_unlock(&m->lock);
+}
+
 static void *mqtt_thread(void *data) {
   mqtt_t *m = data;
   for (;;) {
     pthread_mutex_lock(&m->lock);
-    bool ready = m->ready;
+    bool ready = m->ready, stop = m->stop_req;
     pthread_mutex_unlock(&m->lock);
+    if (stop) {
+      say_goodbye(m);
+      return NULL;
+    }
     if (!ready) { /* mqtt_timer() has not found the printer yet */
       usleep(500000);
       continue;
@@ -797,6 +824,21 @@ static void drain_log(mqtt_t *m) {
   pthread_mutex_unlock(&m->lock);
   for (int i = 0; i < n; i++) papplLog(m->system, q[i].level, "%s", q[i].text);
   if (lost) papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: some log messages were lost.");
+}
+
+/* atexit(): PAPPL has stopped; give the MQTT thread up to 2 s to say
+ * "offline". Touches no PAPPL object. */
+static void stop_at_exit(void) {
+  mqtt_t *m = running_mqtt;
+  struct timespec until;
+  if (!m) return;
+  clock_gettime(CLOCK_REALTIME, &until);
+  until.tv_sec += 2;
+  pthread_mutex_lock(&m->lock);
+  m->stop_req = true;
+  while (!m->stopped)
+    if (pthread_cond_timedwait(&m->stop_cond, &m->lock, &until)) break;
+  pthread_mutex_unlock(&m->lock);
 }
 
 static bool mqtt_timer(pappl_system_t *system, void *data) {
@@ -867,6 +909,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
   if (!m) return;
   m->system = system;
   pthread_mutex_init(&m->lock, NULL);
+  pthread_cond_init(&m->stop_cond, NULL);
   m->cmd_power = m->cmd_auto_on = m->cmd_auto_off = -1;
   const char *v, *bad;
   sp211_broker br;
@@ -944,6 +987,8 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
     return;
   }
   pthread_detach(tid);
+  running_mqtt = m;
+  atexit(stop_at_exit);
   papplSystemAddTimerCallback(system, time(NULL) + 1, TICK_SECONDS, mqtt_timer, m);
   papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s, user %s%s%s.", m->broker,
            m->username[0] ? m->username : "(none)",
