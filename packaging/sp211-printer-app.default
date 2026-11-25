@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Settings of the sp211-printer-app service.
 #
 # Read by systemd when the service starts: after a change, run

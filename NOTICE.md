@@ -9,12 +9,15 @@ below).
 |---|---|---|
 | `src/lilo2.c`, `src/lilo2.h`, `src/dither_matrix.h` | copied unchanged from [Creative8428/ricoh-sp211-driver](https://github.com/Creative8428/ricoh-sp211-driver), © 2026 Alexandru Hrisca | GPL-2.0-or-later |
 | `third_party/jbigkit/` | JBIG-KIT 2.2 by Markus Kuhn, as found in the same repository. `jbig.c` carries one change made there (marked `RICOH_FLUSH`, dated and described in its header); the other files are unmodified. | GPL-2.0-or-later (`third_party/jbigkit/COPYING`) |
-| `src/sp211-printer-app.c`, `src/sp211_status.c`, `src/sp211_status.h`, `src/sp211_usb.c`, `src/sp211_usb.h`, `tools/`, `tests/`, `docs/`, `packaging/`, `Makefile` | written for this project | GPL-2.0-or-later |
+| `src/sp211-printer-app.c`, `src/sp211_*.c`, `src/sp211_*.h`, `homeassistant/`, `tools/`, `tests/`, `docs/`, `packaging/`, `Makefile` | written for this project | GPL-2.0-or-later |
 | `src/sp211-printer-app.c`: paper sizes, media types, margins | taken from the PPD of the same repository, © 2026 Alexandru Hrisca | GPL-2.0-or-later |
 
 Libraries linked at build time and not included here: PAPPL (Apache-2.0),
 libcups (Apache-2.0 with an exception that permits linking with GPL-2.0
-software) and libusb (LGPL-2.1-or-later).
+software), libusb (LGPL-2.1-or-later) and, for MQTT, libmosquitto (dual
+licensed EPL-2.0 or EDL-1.0; the Eclipse Distribution License 1.0 is the
+BSD 3-clause license, compatible with the GNU GPL, and is the one relied on
+here).
 
 `src/sp211-printer-app.c` is linked with PAPPL, whose Apache License 2.0 has
 no such exception. The Apache License 2.0 is compatible with version 3 of the GNU GPL
