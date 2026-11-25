@@ -189,7 +189,7 @@ state.
 | Field | Type | Meaning |
 |---|---|---|
 | `state` | string | `idle`, `printing`, or `stopped`: a queue paused by someone (in the web interface, or over IPP). A queue that the application stops itself because the printer cannot be reached is `idle`, with `online` false. |
-| `reasons` | list of strings | IPP printer-state-reasons with their RFC 8011 severity suffix: `toner-low-warning`, `toner-empty-error`, `media-empty-error`, `media-jam-error`, `offline-report`, and `paused` for a stopped queue. Empty when all is well. |
+| `reasons` | list of strings | IPP printer-state-reasons with their RFC 8011 severity suffix: `toner-low-warning`, `toner-empty-error`, `media-empty-error`, `media-jam-error`, `offline-report`, `paused` for a stopped queue, and `hold-new-jobs-warning` while the queue holds new jobs ("Hold New Jobs" in the web interface: every new document is refused until it is released there). Empty when all is well. |
 | `problem` | boolean | true when a reason is an error or a warning (`-report` reasons do not count). |
 | `message` | string | reserved, empty. |
 | `accepting` | boolean | the queue accepts new jobs. |

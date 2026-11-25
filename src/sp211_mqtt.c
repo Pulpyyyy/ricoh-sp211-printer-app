@@ -265,6 +265,12 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
     first = false;
     problem = true;
   }
+  /* "Hold New Jobs" (web interface or IPP): every new document is refused */
+  if (papplPrinterIsHoldingNewJobs(printer)) {
+    sp211_buf_printf(&r, "%s\"hold-new-jobs-warning\"", first ? "" : ",");
+    first = false;
+    problem = true;
+  }
   for (size_t i = 0; i < sizeof reasons / sizeof reasons[0]; i++) {
     if (!(preasons & reasons[i].bit)) continue;
     if (reasons[i].bit == PAPPL_PREASON_OFFLINE && online) continue;
