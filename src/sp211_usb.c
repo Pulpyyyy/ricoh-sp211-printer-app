@@ -3,6 +3,7 @@
 #include "sp211_usb.h"
 
 #include <ctype.h>
+#include <stdio.h>
 #include <string.h>
 
 int sp211_usb_uri_serial(const char *device_uri, char *serial, size_t size) {
@@ -25,6 +26,22 @@ int sp211_usb_uri_serial(const char *device_uri, char *serial, size_t size) {
   }
   serial[n] = '\0';
   return n > 0;
+}
+
+/* "@SDC_SET" + 2-digit name length + name + 2-digit value length + value,
+ * after the three bytes 62 FF 00 that the firmware skips (Ricoh's tool sends
+ * them as part of the Windows "vendor set command" buffer). */
+size_t sp211_usb_internal_page_request(const char *page, unsigned char *buf, size_t size) {
+  if (!page || (strcmp(page, SP211_PAGE_TEST) && strcmp(page, SP211_PAGE_MAINTENANCE))) return 0;
+  char text[64];
+  int n = snprintf(text, sizeof text, "@SDC_SET%02u%s%02u%s", 8u, "TESTPAGE",
+                   (unsigned)strlen(page), page);
+  if (n < 0 || (size_t)n + 3 > size) return 0;
+  buf[0] = 0x62;
+  buf[1] = 0xff;
+  buf[2] = 0x00;
+  memcpy(buf + 3, text, (size_t)n);
+  return (size_t)n + 3;
 }
 
 #ifdef HAVE_LIBUSB
@@ -128,7 +145,30 @@ int sp211_usb_read_counters(const char *device_uri, int want_misfeeds, sp211_cou
   return out->have_pages;
 }
 
+#define REQ_WRITE 0x62
+
+int sp211_usb_print_internal_page(const char *device_uri, const char *page) {
+  unsigned char data[64];
+  size_t n = sp211_usb_internal_page_request(page, data, sizeof data);
+  libusb_context *ctx;
+  int ok = 0;
+  if (!n || libusb_init(&ctx) != 0) return 0;
+  libusb_device_handle *h = open_printer(ctx, device_uri);
+  if (h) {
+    ok = libusb_control_transfer(h, 0x41, REQ_WRITE, 0xFF00, 0, data, (uint16_t)n, 3000) == (int)n;
+    libusb_close(h);
+  }
+  libusb_exit(ctx);
+  return ok;
+}
+
 #else /* !HAVE_LIBUSB */
+
+int sp211_usb_print_internal_page(const char *device_uri, const char *page) {
+  (void)device_uri;
+  (void)page;
+  return 0;
+}
 
 int sp211_usb_read_counters(const char *device_uri, int want_misfeeds, sp211_counters *out) {
   (void)device_uri;

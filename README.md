@@ -8,8 +8,13 @@ Home Assistant print to it and read its status without any driver.
   own "lilo2" stream by the encoder of
   [Creative8428/ricoh-sp211-driver](https://github.com/Creative8428/ricoh-sp211-driver).
 - **Reports the printer's state over IPP**: toner level (`printer-supply`,
-  `marker-levels`), toner low, and the printer's own page counter
-  (`printer-impressions-completed`).
+  `marker-levels`), toner low and empty, the printer's own page counter
+  (`printer-impressions-completed`), its firmware version, and "stopped"
+  while the printer cannot be reached.
+- **Publishes the printer to Home Assistant over MQTT** (optional): jobs,
+  counters, misfeeds, test pages, and a power switch that a smart plug can
+  follow, to switch the printer on when a document arrives and off when it
+  has been idle.
 - **Runs as a service** on a small Linux machine with the printer on USB, for
   example a Proxmox LXC container.
 
@@ -44,7 +49,7 @@ container, with the tests run before packaging (`packaging/build-deb.sh`).
 On Debian 13 (or Ubuntu), with the printer on USB:
 
 ```
-sudo apt install build-essential libpappl-dev libusb-1.0-0-dev avahi-daemon
+sudo apt install build-essential libpappl-dev libusb-1.0-0-dev libmosquitto-dev avahi-daemon
 make
 make test
 sudo make install
@@ -85,10 +90,32 @@ that already had the printer).
 ### Home Assistant
 
 Home Assistant's IPP integration finds the printer by itself, or can be
-pointed at host `HOST`, port `631`, path `/ipp/print/SP211`. It shows the
-printer state and the page counter ("impressions"). The toner level is
-published too; its sensor has not been checked in Home Assistant yet, and
-may need a reload of the integration after the first status read.
+pointed at host `HOST`, port `631`, path `/ipp/print/SP211`. It shows:
+
+- the printer state: idle, printing, or stopped while the printer is
+  switched off or unplugged; the state sensor's `state_reason` attribute
+  holds `toner-low`, `toner-empty` or `offline`;
+- the toner level ("Black Toner", percent);
+- the page counter ("impressions"), the printer's own lifetime total;
+- the printer's firmware first in the device's firmware field, followed by
+  the versions of this application and of its libraries (PAPPL adds those).
+
+That is all the IPP integration reads. For more, enable MQTT: set the
+broker in `/etc/default/sp211-printer-app` and restart the service. The
+printer then also appears as a device of the MQTT integration, with:
+
+- the current job, the jobs waiting, and the last job with its time and
+  result;
+- the page counter and the paper misfeeds;
+- buttons for the printer's test and maintenance pages;
+- a power switch, with auto power on when a document arrives and auto power
+  off after a delay; the blueprint
+  [`homeassistant/blueprints/sp211_power.yaml`](homeassistant/blueprints/sp211_power.yaml)
+  links it to any plug in two fields.
+
+See [docs/MQTT.md](docs/MQTT.md). The
+[CUPS card](https://github.com/Pulpyyyy/cupscard) shows all of it on a
+dashboard.
 
 ## Status
 
@@ -101,8 +128,12 @@ Tested on one printer: Ricoh SP 211, firmware V1.06, Debian 13, PAPPL 1.3.1.
 | Heavy page (gray, about 350 KB of printer data) | verified on paper |
 | Paper size taken from the page received; copies | verified |
 | Toner level and toner low | verified: 50 % |
+| Toner empty (`toner-empty` at 0 %) | not tested |
+| Firmware version in `printer-firmware-string-version` | not tested; read at start-up |
+| Queue stopped while the printer cannot be reached, resumed when it answers | not tested |
 | Page counter as `printer-impressions-completed` | verified |
-| Offline when the printer cannot be reached | not tested |
+| MQTT: device, jobs, counters, test pages | not tested |
+| MQTT: auto power on and off through the blueprint | not tested |
 | Out of paper | not yet: the printer only reports it during a job |
 | 1200×600 dpi, manual duplex | not supported yet |
 | Cover open, jams in progress | not available: the printer does not transmit them |
@@ -137,6 +168,8 @@ including in its own messages; printing is not affected.
 - [docs/STATUS_PROTOCOL.md](docs/STATUS_PROTOCOL.md): the status packet, the
   counter registers, the printer's job log, and what is known not to work,
   including the zero-length transfer above.
+- [docs/MQTT.md](docs/MQTT.md): MQTT settings, the plug, entities and
+  topics.
 
 ## License
 

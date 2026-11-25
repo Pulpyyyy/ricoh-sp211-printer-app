@@ -60,6 +60,7 @@ typedef struct {
   int have_pages;        /* page_counter is valid */
   uint32_t page_counter; /* lifetime page total */
   int toner_percent;     /* -1 if unknown */
+  char firmware[9];      /* controller firmware ("V1.06"); empty if unknown */
   int have_misfeeds;
   uint32_t misfeed_total, misfeed_tray1;
 } sp211_counters;

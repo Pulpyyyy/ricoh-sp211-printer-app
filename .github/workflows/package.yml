@@ -29,7 +29,7 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            build-essential pkg-config libpappl-dev libusb-1.0-0-dev python3 dpkg-dev ca-certificates git
+            build-essential pkg-config libpappl-dev libusb-1.0-0-dev libmosquitto-dev python3 dpkg-dev             ca-certificates git
 
       - uses: actions/checkout@v4
 

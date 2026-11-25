@@ -18,6 +18,8 @@
 #ifndef SP211_USB_H
 #define SP211_USB_H
 
+#include <stddef.h>
+
 #include "sp211_status.h"
 
 /* Reads the page counter and toner level (and, if want_misfeeds, the misfeed
@@ -30,6 +32,20 @@
  * reached (switched off, unplugged, no permission, no libusb). Never blocks
  * for more than a few seconds. */
 int sp211_usb_read_counters(const char *device_uri, int want_misfeeds, sp211_counters *out);
+
+/* Asks the printer to print one of its own pages: SP211_PAGE_TEST (the
+ * "Test Page" pattern) or SP211_PAGE_MAINTENANCE (counters, misfeeds,
+ * firmware). Sent as an @SDC_SET command with a vendor control request,
+ * outside the print data stream; printing starts about 10 s later. Returns 1
+ * if the printer took the request. */
+#define SP211_PAGE_TEST "GDITESTPAGE"
+#define SP211_PAGE_MAINTENANCE "GDIMAINTENANCE"
+int sp211_usb_print_internal_page(const char *device_uri, const char *page);
+
+/* Builds the request data for sp211_usb_print_internal_page() into buf.
+ * Returns its length, 0 if it does not fit or page is not one of the above.
+ * Exposed for the tests. */
+size_t sp211_usb_internal_page_request(const char *page, unsigned char *buf, size_t size);
 
 /* Extracts the serial number from a USB device URI. Returns 1 and fills
  * serial (NUL terminated) if the URI has one. Exposed for the tests. */

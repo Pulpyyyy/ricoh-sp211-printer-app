@@ -9,9 +9,14 @@
  *
  * The printer's status is read over USB with vendor control requests
  * (src/sp211_usb.c), between jobs: toner level (printer-supply, marker-*),
- * toner-low, offline, and the printer's own page counter, published as
- * printer-impressions-completed. Out-of-paper is only sent by the printer
- * during a job and is not read yet.
+ * toner-low, toner-empty, offline (the queue is then stopped until the
+ * printer answers again), the printer's own page counter, published as
+ * printer-impressions-completed, and its firmware version, published first
+ * in printer-firmware-string-version. Out-of-paper is only sent by the
+ * printer during a job and is not read yet.
+ *
+ * With MQTT_HOST set, the printer is also published to Home Assistant over
+ * MQTT, with a power switch that a plug can follow (src/sp211_mqtt.c).
  *
  *   sp211-printer-app server -o server-port=8632 -o spool-directory=DIR
  *   sp211-printer-app add -d NAME -m ricoh_sp211 -v DEVICE-URI
@@ -24,16 +29,19 @@
 
 #include <pappl/pappl.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <time.h>
 
 #include "lilo2.h"
+#include "sp211_app.h"
+#include "sp211_mqtt.h"
 #include "sp211_status.h"
 #include "sp211_usb.h"
 
-#define VERSION "0.1"
+#define VERSION SP211_APP_VERSION
 #define DRIVER_NAME "ricoh_sp211"
 #define DRIVER_DESC "Ricoh SP 211"
 #define DEVICE_ID "MFG:RICOH;MDL:SP 211;"
@@ -269,11 +277,32 @@ static bool sp211_printfile(pappl_job_t *job, pappl_pr_options_t *options,
 
 /* ---- printer status ---------------------------------------------------- */
 
-#define STATUS_MIN_INTERVAL 30 /* seconds between two reads of the printer */
+#define STATUS_MIN_INTERVAL 30 /* seconds between two reads asked by clients */
 #define STATUS_TIMER 60        /* seconds between two reads without any client */
+#define STATUS_TICK 5          /* the timer's period; also the read period while polling soon */
+#define POLL_SOON_SECONDS 180  /* how long sp211_app_poll_soon() lasts */
 
+/* One printer per application: the state below is shared, under status_lock. */
 static pthread_mutex_t status_lock = PTHREAD_MUTEX_INITIALIZER;
-static time_t status_last; /* last read attempt (one printer per application) */
+static time_t status_last;       /* last read attempt */
+static time_t poll_until;        /* read every STATUS_TICK seconds until then */
+static bool misfeeds_due = true; /* read the misfeed counters at the next read */
+static sp211_app_status app_status = {.toner_percent = -1};
+/* used by status_timer() only */
+static int offline_reads;    /* consecutive reads that found no printer */
+static bool stopped_offline; /* we stopped the printer because it could not be reached */
+
+void sp211_app_get_status(sp211_app_status *st) {
+  pthread_mutex_lock(&status_lock);
+  *st = app_status;
+  pthread_mutex_unlock(&status_lock);
+}
+
+void sp211_app_poll_soon(void) {
+  pthread_mutex_lock(&status_lock);
+  poll_until = time(NULL) + POLL_SOON_SECONDS;
+  pthread_mutex_unlock(&status_lock);
+}
 
 static void set_toner(pappl_printer_t *printer, int level) {
   pappl_supply_t s;
@@ -286,31 +315,47 @@ static void set_toner(pappl_printer_t *printer, int level) {
   papplPrinterSetSupplies(printer, 1, &s);
 }
 
-/* Reads toner and page counter from the printer and publishes them. Not
- * while a job prints: reading the registers then has not been tested. */
-static void update_status(pappl_printer_t *printer, bool force) {
-  if (papplPrinterGetState(printer) == IPP_PSTATE_PROCESSING) return;
+typedef enum { STATUS_SKIPPED, STATUS_OFFLINE, STATUS_ONLINE } status_result_t;
+
+/* Reads toner, page counter and firmware from the printer and publishes
+ * them; the misfeed counters too (about 3 s more) at start-up and after the
+ * page counter moved. Not while a job prints: reading the registers then has
+ * not been tested. */
+static status_result_t update_status(pappl_printer_t *printer, bool force) {
+  if (papplPrinterGetState(printer) == IPP_PSTATE_PROCESSING) return STATUS_SKIPPED;
   time_t now = time(NULL);
   pthread_mutex_lock(&status_lock);
   if (!force && status_last && now - status_last < STATUS_MIN_INTERVAL) {
     pthread_mutex_unlock(&status_lock);
-    return;
+    return STATUS_SKIPPED;
   }
   status_last = now;
+  app_status.read = true;
+  app_status.last_read = now;
 
   sp211_counters c;
   sp211_counters_init(&c);
-  if (!sp211_usb_read_counters(papplPrinterGetDeviceURI(printer), 0, &c)) {
+  if (!sp211_usb_read_counters(papplPrinterGetDeviceURI(printer), misfeeds_due, &c)) {
     /* switched off, unplugged, or no permission on the USB device */
+    app_status.online = false;
     papplPrinterSetReasons(printer, PAPPL_PREASON_OFFLINE, PAPPL_PREASON_NONE);
     pthread_mutex_unlock(&status_lock);
-    return;
+    return STATUS_OFFLINE;
   }
+  app_status.online = true;
   pappl_preason_t add = PAPPL_PREASON_NONE, remove = PAPPL_PREASON_OFFLINE;
   if (c.toner_percent >= 0) {
+    app_status.toner_percent = c.toner_percent;
     set_toner(printer, c.toner_percent);
-    if (c.toner_percent <= SP211_TONER_LOW_PERCENT) add |= PAPPL_PREASON_TONER_LOW;
-    else remove |= PAPPL_PREASON_TONER_LOW;
+    if (c.toner_percent == 0) {
+      add |= PAPPL_PREASON_TONER_EMPTY;
+      remove |= PAPPL_PREASON_TONER_LOW;
+    } else if (c.toner_percent <= SP211_TONER_LOW_PERCENT) {
+      add |= PAPPL_PREASON_TONER_LOW;
+      remove |= PAPPL_PREASON_TONER_EMPTY;
+    } else {
+      remove |= PAPPL_PREASON_TONER_LOW | PAPPL_PREASON_TONER_EMPTY;
+    }
   }
   papplPrinterSetReasons(printer, add, remove);
 
@@ -319,8 +364,18 @@ static void update_status(pappl_printer_t *printer, bool force) {
   if (c.have_pages) {
     int delta = (int)c.page_counter - papplPrinterGetImpressionsCompleted(printer);
     if (delta) papplPrinterSetImpressionsCompleted(printer, delta);
+    if (app_status.have_pages && c.page_counter != app_status.pages) misfeeds_due = true;
+    app_status.have_pages = true;
+    app_status.pages = c.page_counter;
   }
+  if (c.have_misfeeds) {
+    app_status.have_misfeeds = true;
+    app_status.misfeeds = c.misfeed_total;
+    misfeeds_due = false;
+  }
+  if (c.firmware[0]) papplCopyString(app_status.firmware, c.firmware, sizeof app_status.firmware);
   pthread_mutex_unlock(&status_lock);
+  return STATUS_ONLINE;
 }
 
 static bool app_status_cb(pappl_printer_t *printer) {
@@ -328,14 +383,75 @@ static bool app_status_cb(pappl_printer_t *printer) {
   return true;
 }
 
-static void status_each_printer(pappl_printer_t *printer, void *data) {
-  (void)data;
-  if (!strcmp(papplPrinterGetDriverName(printer), DRIVER_NAME)) update_status(printer, true);
+/* Fills printer-firmware-string-version (shown by Home Assistant as the
+ * device's firmware): the printer's firmware first, then this application.
+ * PAPPL adds its own libraries after these. Takes the system lock for
+ * writing: call it only where PAPPL holds no system lock, i.e. not from a
+ * timer, which runs under the read lock. */
+static void set_versions(pappl_system_t *system, const char *firmware) {
+  pappl_version_t v[2];
+  int n = 0;
+  memset(v, 0, sizeof v);
+  if (firmware && firmware[0]) {
+    papplCopyString(v[n].name, DRIVER_DESC, sizeof v[n].name);
+    papplCopyString(v[n].sversion, firmware, sizeof v[n].sversion);
+    unsigned short *d = v[n].version; /* "V1.06" -> 1.6 */
+    sscanf(firmware + (firmware[0] == 'V' || firmware[0] == 'v'), "%hu.%hu", d, d + 1);
+    n++;
+  }
+  papplCopyString(v[n].name, "sp211-printer-app", sizeof v[n].name);
+  papplCopyString(v[n].sversion, VERSION, sizeof v[n].sversion);
+  sscanf(VERSION, "%hu.%hu.%hu", v[n].version, v[n].version + 1, v[n].version + 2);
+  n++;
+  papplSystemSetVersions(system, n, v);
 }
 
+typedef struct {
+  bool due; /* read the printer now */
+  pappl_printer_t *printer;
+  status_result_t result;
+} timer_read_t;
+
+static void status_each_printer(pappl_printer_t *printer, void *data) {
+  timer_read_t *t = data;
+  if (t->printer || strcmp(papplPrinterGetDriverName(printer), DRIVER_NAME)) return;
+  t->printer = printer;
+  if (t->due) t->result = update_status(printer, true);
+}
+
+/* Runs every STATUS_TICK seconds and reads the printer every STATUS_TIMER
+ * seconds, or every tick while sp211_app_poll_soon() asked for it. The
+ * printer is stopped when two reads in a row cannot reach it (jobs then wait
+ * in the queue) and resumed when it answers again; a printer that someone
+ * else stopped is left alone. PAPPL runs timers under the system read lock,
+ * which pause and resume do not take. */
 static bool status_timer(pappl_system_t *system, void *data) {
   (void)data;
-  papplSystemIteratePrinters(system, status_each_printer, NULL);
+  time_t now = time(NULL);
+  timer_read_t t = {false, NULL, STATUS_SKIPPED};
+  pthread_mutex_lock(&status_lock);
+  t.due = now - status_last >= STATUS_TIMER || (now < poll_until && now - status_last >= STATUS_TICK);
+  pthread_mutex_unlock(&status_lock);
+  papplSystemIteratePrinters(system, status_each_printer, &t);
+  if (!t.printer || t.result == STATUS_SKIPPED) return true;
+
+  if (t.result == STATUS_OFFLINE) offline_reads++;
+  else offline_reads = 0;
+
+  if (offline_reads >= 2 && papplPrinterGetState(t.printer) == IPP_PSTATE_IDLE) {
+    papplLogPrinter(t.printer, PAPPL_LOGLEVEL_INFO, "Printer not reachable, stopping the queue.");
+    papplPrinterPause(t.printer);
+    stopped_offline = true;
+  } else if (t.result == STATUS_ONLINE && stopped_offline) {
+    stopped_offline = false;
+    if (papplPrinterGetState(t.printer) == IPP_PSTATE_STOPPED) {
+      papplLogPrinter(t.printer, PAPPL_LOGLEVEL_INFO, "Printer reachable again, resuming the queue.");
+      papplPrinterResume(t.printer);
+    }
+  }
+  pthread_mutex_lock(&status_lock);
+  app_status.stopped_offline = stopped_offline;
+  pthread_mutex_unlock(&status_lock);
   return true;
 }
 
@@ -477,8 +593,18 @@ static pappl_system_t *system_cb(int num_options, cups_option_t *options, void *
                                driver_cb, data);
   papplSystemSetFooterHTML(system, "Ricoh SP 211 Printer Application " VERSION);
   papplSystemSetSaveCallback(system, (pappl_save_cb_t)papplSystemSaveState, state_file);
+  /* Loading the printers reads their status once, firmware included. The
+   * version list is set now, before the server runs: a printer switched off
+   * at start-up shows its firmware after the next restart only. */
   papplSystemLoadState(system, state_file);
-  papplSystemAddTimerCallback(system, time(NULL) + 5, STATUS_TIMER, status_timer, NULL);
+  set_versions(system, app_status.firmware);
+  papplSystemAddTimerCallback(system, time(NULL) + STATUS_TICK, STATUS_TICK, status_timer, NULL);
+
+  /* MQTT for Home Assistant, if MQTT_HOST is set (see src/sp211_mqtt.h) */
+  static char mqtt_settings[1024];
+  if (spooldir) snprintf(mqtt_settings, sizeof mqtt_settings, "%s/sp211-mqtt.conf", spooldir);
+  else papplCopyString(mqtt_settings, "/var/lib/sp211-mqtt.conf", sizeof mqtt_settings);
+  sp211_mqtt_start(system, mqtt_settings);
   return system;
 }
 

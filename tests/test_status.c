@@ -9,6 +9,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sp211_json.h"
+#include "sp211_power.h"
 #include "sp211_status.h"
 #include "sp211_usb.h"
 
@@ -120,6 +122,13 @@ static void test_counters(void) {
   CHECK(!c.have_pages && c.toner_percent == -1);
   CHECK(sp211_decode_register1(reg1, 64, &c));
   CHECK(c.have_pages && c.page_counter == 184 && c.toner_percent == 75);
+  CHECK(!strcmp(c.firmware, "V1.06"));
+  unsigned char odd[64];
+  memcpy(odd, reg1, 64);
+  odd[0x19] = 0x01;                                    /* not text: ignored */
+  sp211_counters alt0;
+  sp211_counters_init(&alt0);
+  CHECK(sp211_decode_register1(odd, 64, &alt0) && alt0.firmware[0] == '\0');
   CHECK(sp211_decode_misfeeds(reg27, 64, &c));
   CHECK(c.have_misfeeds && c.misfeed_total == 6 && c.misfeed_tray1 == 6);
 
@@ -147,6 +156,91 @@ static void test_uri_serial(void) {
   CHECK(sp211_usb_read_counters(NULL, 1, &c) == 0 || c.have_pages);
 }
 
+static void test_internal_page(void) {
+  unsigned char buf[64];
+  size_t n = sp211_usb_internal_page_request(SP211_PAGE_TEST, buf, sizeof buf);
+  /* the request Ricoh's tool sends, captured (docs/STATUS_PROTOCOL.md) */
+  static const char want[] = "\x62\xff\x00@SDC_SET08TESTPAGE11GDITESTPAGE";
+  CHECK(n == sizeof want - 1 && !memcmp(buf, want, n));
+  n = sp211_usb_internal_page_request(SP211_PAGE_MAINTENANCE, buf, sizeof buf);
+  CHECK(n == 3 + strlen("@SDC_SET08TESTPAGE14GDIMAINTENANCE") &&
+        !memcmp(buf + 3, "@SDC_SET08TESTPAGE14GDIMAINTENANCE", n - 3));
+  CHECK(sp211_usb_internal_page_request("SELFTEST", buf, sizeof buf) == 0); /* only these two */
+  CHECK(sp211_usb_internal_page_request(NULL, buf, sizeof buf) == 0);
+  CHECK(sp211_usb_internal_page_request(SP211_PAGE_TEST, buf, 10) == 0);    /* too small */
+}
+
+static void test_json(void) {
+  sp211_buf b = {0};
+  CHECK(!strcmp(sp211_buf_text(&b), ""));
+  sp211_buf_cat(&b, "{\"name\":");
+  sp211_buf_json_string(&b, "a\"b\\c\n\x01\xc3\xa9");
+  sp211_buf_printf(&b, ",\"n\":%d,\"x\":", 42);
+  sp211_buf_json_string(&b, NULL);
+  sp211_buf_cat(&b, "}");
+  CHECK(!b.failed);
+  CHECK(!strcmp(sp211_buf_text(&b),
+               "{\"name\":\"a\\\"b\\\\c\\n\\u0001\xc3\xa9\",\"n\":42,\"x\":null}"));
+  for (int i = 0; i < 1000; i++) sp211_buf_cat(&b, "0123456789"); /* grows */
+  CHECK(!b.failed && b.len == strlen(sp211_buf_text(&b)) && b.len > 10000);
+  sp211_buf_free(&b);
+  CHECK(b.s == NULL && b.len == 0);
+}
+
+static void test_power(void) {
+  sp211_power p;
+  time_t t = 1000000;
+  sp211_power_init(&p);
+  CHECK(p.auto_on && p.auto_off && p.delay_min == 15 && !p.linked && !p.on);
+  CHECK(sp211_power_clamp_delay(0) == 1 && sp211_power_clamp_delay(500) == 240 &&
+        sp211_power_clamp_delay(30) == 30);
+
+  /* not linked: the switch only mirrors the printer, nothing is decided */
+  CHECK(sp211_power_step(&p, true, false, t) && p.on);
+  CHECK(sp211_power_step(&p, false, true, t + 1) && !p.on);    /* no auto on */
+  CHECK(!sp211_power_step(&p, false, true, t + 2) && !p.on);
+  CHECK(sp211_power_off_at(&p, false) == 0);
+
+  /* Home Assistant links the plug: it is off */
+  sp211_power_set(&p, false, t);
+  CHECK(p.linked && !p.on);
+  /* idle and off: stays off */
+  CHECK(!sp211_power_step(&p, false, false, t + 10) && !p.on);
+  /* a job arrives: auto on */
+  CHECK(sp211_power_step(&p, false, true, t + 20) && p.on);
+  CHECK(sp211_power_off_at(&p, true) == 0);                    /* never while busy */
+  /* the printer boots and prints; still busy */
+  CHECK(!sp211_power_step(&p, true, true, t + 60) && p.on);
+  /* the job ends: idle period starts, off 15 min later */
+  CHECK(!sp211_power_step(&p, true, false, t + 100) && p.on);
+  CHECK(sp211_power_off_at(&p, false) == t + 100 + 15 * 60);
+  CHECK(!sp211_power_step(&p, true, false, t + 100 + 15 * 60 - 1) && p.on);
+  CHECK(sp211_power_step(&p, true, false, t + 100 + 15 * 60) && !p.on);
+  CHECK(sp211_power_off_at(&p, false) == 0);
+  /* the printer has not lost power yet: off stays off (the plug decides) */
+  CHECK(!sp211_power_step(&p, true, false, t + 100 + 15 * 60 + 5) && !p.on);
+
+  /* switched on by hand: a new idle period, not an immediate auto off */
+  sp211_power_set(&p, true, t + 5000);
+  CHECK(!sp211_power_step(&p, true, false, t + 5001) && p.on);
+  CHECK(sp211_power_off_at(&p, false) == t + 5000 + 15 * 60);
+
+  /* a job during the idle period restarts it */
+  CHECK(!sp211_power_step(&p, true, true, t + 5100) && p.on);
+  CHECK(!sp211_power_step(&p, true, false, t + 5200) && p.on);
+  CHECK(sp211_power_off_at(&p, false) == t + 5200 + 15 * 60);
+
+  /* auto off disabled: stays on */
+  p.auto_off = false;
+  CHECK(!sp211_power_step(&p, true, false, t + 99999) && p.on);
+  CHECK(sp211_power_off_at(&p, false) == 0);
+
+  /* auto on disabled: a job waits for someone to switch the printer on */
+  sp211_power_set(&p, false, t + 100000);
+  p.auto_on = false;
+  CHECK(!sp211_power_step(&p, false, true, t + 100001) && !p.on);
+}
+
 int main(void) {
   from_hex(IDLE_HEX, IDLE, 64);
   from_hex(PAPER_OUT_HEX, PAPER_OUT, 64);
@@ -154,6 +248,9 @@ int main(void) {
   test_stream();
   test_counters();
   test_uri_serial();
+  test_internal_page();
+  test_json();
+  test_power();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

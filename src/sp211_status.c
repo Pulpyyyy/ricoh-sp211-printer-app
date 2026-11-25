@@ -60,6 +60,16 @@ int sp211_decode_register1(const unsigned char *reg, size_t n, sp211_counters *c
   c->page_counter = le32(reg + 0x2c);
   c->have_pages = 1;
   if (reg[5] <= 100) c->toner_percent = reg[5];
+  /* firmware version, NUL-padded text at 0x18-0x1F; kept only if printable */
+  size_t len = 0;
+  while (len < sizeof c->firmware - 1 && reg[0x18 + len]) len++;
+  int printable = len > 0;
+  for (size_t i = 0; i < len; i++)
+    if (reg[0x18 + i] < 0x20 || reg[0x18 + i] > 0x7e) printable = 0;
+  if (printable) {
+    memcpy(c->firmware, reg + 0x18, len);
+    c->firmware[len] = '\0';
+  }
   return 1;
 }
 
