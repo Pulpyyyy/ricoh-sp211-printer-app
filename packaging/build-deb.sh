@@ -62,7 +62,7 @@ Architecture: $ARCH
 Maintainer: Pulpyyyy <Pulpyyyy@users.noreply.github.com>
 Installed-Size: $SIZE
 Depends: $DEPENDS
-Recommends: avahi-daemon
+Recommends: avahi-daemon, ca-certificates
 Section: misc
 Priority: optional
 Homepage: https://github.com/Pulpyyyy/ricoh-sp211-printer-app

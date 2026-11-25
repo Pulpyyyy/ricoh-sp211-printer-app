@@ -1,17 +1,56 @@
-# Settings of the sp211-printer-app service, read when it starts:
-#   sudo systemctl restart sp211-printer-app
+# Settings of the sp211-printer-app service.
 #
-# MQTT for Home Assistant: the printer appears by itself as a device of the
-# MQTT integration (state, toner, counters, jobs, test pages, and a power
-# switch that a plug can follow; see docs/MQTT.md). Off while MQTT_HOST is
-# not set.
+# Read by systemd when the service starts: after a change, run
+#   systemctl restart sp211-printer-app
+# and check the result with
+#   journalctl -u sp211-printer-app -n 30 --no-pager | grep MQTT
 #
-#MQTT_HOST=192.168.1.10
+# Format: one NAME=value per line, no space around "=", no comment at the
+# end of a line. A value with special characters goes between single
+# quotes, where everything is kept as written: MQTT_PASSWORD='p@ss word#1$'
+# (it then cannot contain a single quote). Remove the "#" in front of a line
+# to use it. Details: /usr/share/doc/sp211-printer-app/MQTT.md
+#
+# ---- MQTT for Home Assistant ---------------------------------------------
+# Publishes the printer as a Home Assistant device (state, toner, counters,
+# jobs, test pages, and a power switch that a plug can follow). Off while
+# MQTT_HOST is not set; printing does not need it.
+#
+# Broker: a name, an IPv4 address, or an IPv6 address in brackets; may be
+# followed by :PORT and preceded by mqtt:// or mqtts:// (TLS).
+#MQTT_HOST=192.168.1.52
+#
+# Port, 1 to 65535. Default: 1883, or 8883 with TLS.
 #MQTT_PORT=1883
+#
+# Login on the broker, if it asks for one.
 #MQTT_USERNAME=sp211
 #MQTT_PASSWORD=secret
 #
-# Rarely needed:
+# ---- MQTT over TLS (mqtts) -----------------------------------------------
+# yes/no. Default: yes when MQTT_HOST starts with mqtts://, no otherwise.
+#MQTT_TLS=yes
+#
+# Authority that signed the broker's certificate (PEM file); for a
+# self-signed certificate, the certificate itself. Default: the system's
+# authorities in /etc/ssl/certs.
+#MQTT_CA_FILE=/etc/sp211-printer-app/broker.crt
+#
+# Client certificate and its key (PEM, no passphrase), only if the broker
+# asks clients for one. Both or neither.
+#MQTT_CERT_FILE=/etc/sp211-printer-app/client.crt
+#MQTT_KEY_FILE=/etc/sp211-printer-app/client.key
+#
+# yes: do not check that the broker's certificate names MQTT_HOST.
+#MQTT_TLS_INSECURE=no
+#
+# ---- Rarely needed ---------------------------------------------------------
+# Home Assistant's discovery prefix, if changed in its MQTT integration.
 #MQTT_DISCOVERY_PREFIX=homeassistant
+#
+# Base of the printer's topics. Default: sp211-printer-app/<printer name>.
 #MQTT_TOPIC=sp211-printer-app/sp211
+#
+# Link to the web interface shown in Home Assistant. Default:
+# http://<this machine's name>:631/
 #PRINTER_WEB_URL=http://192.168.1.14:631/

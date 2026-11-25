@@ -8,33 +8,123 @@ switch that a smart plug can follow.
 ## Setting it up
 
 1. Home Assistant needs an MQTT broker, for example the Mosquitto add-on,
-   and the MQTT integration. Create a Home Assistant user for the printer
-   application (Settings → People → Users), or use the broker's own users.
-2. On the machine of the printer application, in
-   `/etc/default/sp211-printer-app`:
+   and the MQTT integration. Give the printer application its own login:
+   with the Mosquitto add-on, a Home Assistant user (Settings → People →
+   Users) or an entry under `logins` in the add-on's configuration.
+2. On the machine of the printer application, edit
+   `/etc/default/sp211-printer-app` (as root) and set at least `MQTT_HOST`,
+   and `MQTT_USERNAME` and `MQTT_PASSWORD` if the broker asks for a login:
 
    ```
-   MQTT_HOST=192.168.1.10
+   MQTT_HOST=192.168.1.52
    MQTT_USERNAME=sp211
    MQTT_PASSWORD=secret
    ```
 
-   then `sudo systemctl restart sp211-printer-app`. The log
-   (`journalctl -u sp211-printer-app`) shows `MQTT: connected to ...`.
-3. The device "SP211" (the printer's name) appears in Settings → Devices,
-   integration MQTT.
+3. Restart the service, then read its log:
 
-| Variable | Default | |
+   ```
+   sudo systemctl restart sp211-printer-app
+   journalctl -u sp211-printer-app -n 30 --no-pager | grep MQTT
+   ```
+
+   `MQTT: connected to mqtt://192.168.1.52:1883.` means it works; the table
+   under [Log messages](#log-messages) explains the others.
+4. The device appears in Home Assistant under Settings → Devices &
+   services → MQTT, named after the printer ("SP211").
+
+## The settings file
+
+`/etc/default/sp211-printer-app` is read by systemd when the service starts
+(`EnvironmentFile=` in the service), so a change needs a restart of the
+service. The package installs it with every line commented out, owned by
+root and readable by root only (mode 600), since it holds the MQTT password;
+an upgrade keeps your version.
+
+Its format is systemd's, not a shell script's:
+
+- one setting per line, `NAME=value`, with no space around `=`;
+- a line starting with `#` is a comment; there is no comment at the end of
+  a line (`MQTT_PORT=1883 # broker` makes the port `1883 # broker`, which is
+  refused);
+- spaces at the start and the end of a value are dropped; spaces inside it
+  are kept;
+- without quotes, a backslash keeps the next character as it is: `\\` is
+  one backslash;
+- between single quotes everything is kept exactly as written, with no
+  escape at all: `MQTT_PASSWORD='p@ss word#1$\'` is `p@ss word#1$\`. The
+  simplest way to write a password with special characters. It cannot
+  contain a single quote;
+- a value containing a single quote goes between double quotes, where `\"`,
+  `\\`, `` \` `` and `\$` stand for `"`, `\`, `` ` `` and `$`:
+  `MQTT_PASSWORD="it's \"ok\""` is `it's "ok"`;
+- no `$NAME` is replaced by another variable's value.
+
+### All the settings
+
+| Setting | Default | Values |
 |---|---|---|
-| `MQTT_HOST` | none: MQTT off | broker address |
-| `MQTT_PORT` | `1883` | |
-| `MQTT_USERNAME`, `MQTT_PASSWORD` | none | |
-| `MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant's discovery prefix |
-| `MQTT_TOPIC` | `sp211-printer-app/NAME` | base topic; NAME is the printer's name in lower case |
-| `PRINTER_WEB_URL` | `http://HOSTNAME:631/` | link to the web interface on the device page |
+| `MQTT_HOST` | not set: MQTT is off | The broker: a host name (`ha.lan`), an IPv4 address (`192.168.1.52`) or an IPv6 address in brackets (`[fd00::52]`). Optionally followed by `:PORT` (`192.168.1.52:1884`), optionally preceded by `mqtt://` or `mqtts://` (`mqtts://ha.lan:8883`); `mqtts://` turns TLS on. |
+| `MQTT_PORT` | `1883`, or `8883` with TLS | The broker's port, 1 to 65535. Wins over a port written in `MQTT_HOST`. |
+| `MQTT_USERNAME` | none | Login on the broker. Not set: no login is sent. |
+| `MQTT_PASSWORD` | none | Its password. |
+| `MQTT_TLS` | `no`, or `yes` with `mqtts://` | `yes` or `no` (also `true`/`false`, `on`/`off`, `1`/`0`): MQTT over TLS. Wins over the scheme in `MQTT_HOST`. |
+| `MQTT_CA_FILE` | the system's authorities (`/etc/ssl/certs`) | With TLS: the certificate (PEM) of the authority that signed the broker's certificate. For a self-signed broker certificate, that certificate itself. |
+| `MQTT_CERT_FILE`, `MQTT_KEY_FILE` | none | With TLS, for a broker that asks clients for a certificate: the client's certificate and its private key (PEM, the key without a passphrase). Both or neither. |
+| `MQTT_TLS_INSECURE` | `no` | `yes`: do not check that the broker's certificate carries the name or address used in `MQTT_HOST` (the certificate is still checked against the authority). Only for a broker whose certificate does not name it. |
+| `MQTT_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant's discovery prefix, if it was changed in the MQTT integration. |
+| `MQTT_TOPIC` | `sp211-printer-app/NAME` | Base of this printer's topics; NAME is the printer's name in lower case, other characters replaced by `_` (`SP211` → `sp211`). |
+| `PRINTER_WEB_URL` | `http://HOSTNAME:631/` | The "Visit" link of the device in Home Assistant, and the card's link to the web interface. Set it when Home Assistant cannot resolve the machine's name, e.g. `http://192.168.1.14:631/`. |
+
+A value that cannot be read (a port that is not a number, `MQTT_TLS=maybe`,
+a certificate file that does not exist or cannot be read) turns MQTT off
+with an error in the log naming the setting; printing is not affected.
+
+Examples:
+
+```
+# Mosquitto add-on, plain MQTT
+MQTT_HOST=192.168.1.52
+MQTT_USERNAME=sp211
+MQTT_PASSWORD=secret
+
+# Another port
+MQTT_HOST=192.168.1.52
+MQTT_PORT=1884
+
+# TLS, broker certificate signed by a public authority
+MQTT_HOST=mqtts://mqtt.example.org
+
+# TLS, self-signed broker certificate copied to the printer's machine
+MQTT_HOST=mqtts://192.168.1.52:8883
+MQTT_CA_FILE=/etc/sp211-printer-app/broker.crt
+```
 
 The power settings changed from Home Assistant (auto on, auto off, delay)
-are kept in `/var/lib/sp211-printer-app/sp211-mqtt.conf`.
+are not in this file: they are kept in
+`/var/lib/sp211-printer-app/sp211-mqtt.conf`.
+
+### Log messages
+
+`journalctl -u sp211-printer-app | grep MQTT`:
+
+| Message | Meaning |
+|---|---|
+| `MQTT: broker mqtt://HOST:PORT, user NAME.` | The settings read at start-up. `user (none)`: no `MQTT_USERNAME`. |
+| `MQTT: publishing printer "SP211" under BASE.` | The printer was found; its topics start with BASE. |
+| `MQTT: connected to mqtt://HOST:PORT.` | Working. |
+| `MQTT: connection refused by ...: Connection Refused: not authorised. (check MQTT_USERNAME and MQTT_PASSWORD)` | The broker refuses the login, or none was given and it asks for one. |
+| `MQTT: cannot connect to ...: Connection refused` | Nothing listens on that address and port: wrong `MQTT_HOST` or `MQTT_PORT`, or the broker is stopped. |
+| `MQTT: cannot connect to ...: No route to host`, `Lookup error.` | The address cannot be reached, or the name cannot be resolved. |
+| `MQTT: TLS set-up failed: ...` | A certificate or key could not be loaded. |
+| `MQTT: connection lost (...)` | The connection dropped; it is opened again by itself. |
+| `MQTT: MQTT_PORT="..." is not valid (see docs/MQTT.md); MQTT is off.` | A setting cannot be read (also `MQTT_HOST`, `MQTT_TLS`, `MQTT_TLS_INSECURE`, the certificate files). |
+| `MQTT_HOST is set but this build has no MQTT support.` | The program was built without libmosquitto. |
+
+After a failure the connection is tried again after 2 s, then 4, 8, 16, 32
+and every 60 s, without limit. A TLS problem (wrong authority, name not in
+the certificate) shows as a lost or refused connection; the broker's own
+log usually says more.
 
 ## The plug
 

@@ -17,6 +17,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #include <ctype.h>
 #include <errno.h>
 #include <mosquitto.h>
+#include <stddef.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,6 +27,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #include <unistd.h>
 
 #include "sp211_app.h"
+#include "sp211_config.h"
 #include "sp211_json.h"
 #include "sp211_power.h"
 #include "sp211_usb.h"
@@ -34,6 +36,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #define TICK_SECONDS 2       /* how often the printer's state is gathered */
 #define RECONNECT_MAX 60     /* seconds between two connection attempts, at most */
 #define POLL_SOON_EVERY 30   /* seconds between two "read the printer soon" requests */
+#define SYSTEM_CA_PATH "/etc/ssl/certs" /* Debian's certificate authorities (ca-certificates) */
 
 typedef struct {
   int id;
@@ -50,6 +53,11 @@ typedef struct {
   /* configuration */
   char host[256];
   int port;
+  char broker[300];       /* "mqtt(s)://host:port", for the log */
+  bool tls;
+  bool tls_insecure;      /* do not check the broker's name in its certificate */
+  char ca_file[512];      /* "" = the system's certificates */
+  char cert_file[512], key_file[512]; /* client certificate, optional */
   char username[128], password[128];
   char prefix[128];       /* discovery prefix */
   char base[256];         /* base topic */
@@ -499,12 +507,14 @@ static void publish(mqtt_t *m, const char *topic, const char *payload, bool reta
 static void on_connect(struct mosquitto *mosq, void *data, int rc) {
   mqtt_t *m = data;
   if (rc) {
-    papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: connection refused by %s: %s", m->host,
-             mosquitto_connack_string(rc));
+    /* rc 4 and 5: bad user name or password, not authorized (MQTT 3.1.1) */
+    papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: connection refused by %s: %s%s", m->broker,
+             mosquitto_connack_string(rc),
+             rc == 4 || rc == 5 ? " (check MQTT_USERNAME and MQTT_PASSWORD)" : "");
     return;
   }
   char topic[sizeof m->base + 16];
-  papplLog(m->system, PAPPL_LOGLEVEL_INFO, "MQTT: connected to %s:%d.", m->host, m->port);
+  papplLog(m->system, PAPPL_LOGLEVEL_INFO, "MQTT: connected to %s.", m->broker);
   m->connected = true;
   m->backoff = 0;
   snprintf(topic, sizeof topic, "%s/set/+", m->base);
@@ -625,6 +635,20 @@ static bool connect_broker(mqtt_t *m) {
     m->mosq = mosquitto_new(id, true, m);
     if (!m->mosq) return false;
     if (m->username[0]) mosquitto_username_pw_set(m->mosq, m->username, m->password[0] ? m->password : NULL);
+    if (m->tls) {
+      rc = mosquitto_tls_set(m->mosq, m->ca_file[0] ? m->ca_file : NULL,
+                             m->ca_file[0] ? NULL : SYSTEM_CA_PATH,
+                             m->cert_file[0] ? m->cert_file : NULL,
+                             m->key_file[0] ? m->key_file : NULL, NULL);
+      if (rc == MOSQ_ERR_SUCCESS && m->tls_insecure) rc = mosquitto_tls_insecure_set(m->mosq, true);
+      if (rc != MOSQ_ERR_SUCCESS) {
+        papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: TLS set-up failed: %s",
+                 rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
+        mosquitto_destroy(m->mosq);
+        m->mosq = NULL;
+        return false;
+      }
+    }
     snprintf(topic, sizeof topic, "%s/availability", m->base);
     mosquitto_will_set(m->mosq, topic, 7, "offline", 1, true);
     mosquitto_connect_callback_set(m->mosq, on_connect);
@@ -632,7 +656,7 @@ static bool connect_broker(mqtt_t *m) {
     mosquitto_message_callback_set(m->mosq, on_message);
     rc = mosquitto_connect(m->mosq, m->host, m->port, 60);
     if (rc != MOSQ_ERR_SUCCESS)
-      papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: cannot connect to %s:%d: %s", m->host, m->port,
+      papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: cannot connect to %s: %s", m->broker,
                rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
   } else {
     rc = mosquitto_reconnect(m->mosq);
@@ -741,9 +765,58 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
   mqtt_t *m = calloc(1, sizeof *m);
   if (!m) return;
   m->system = system;
-  papplCopyString(m->host, host, sizeof m->host);
-  const char *v;
-  m->port = (v = getenv("MQTT_PORT")) && atoi(v) > 0 ? atoi(v) : 1883;
+  const char *v, *bad;
+  sp211_broker br;
+  if (sp211_parse_broker(host, getenv("MQTT_PORT"), getenv("MQTT_TLS"), &br, &bad) <= 0) {
+    if (bad)
+      papplLog(system, PAPPL_LOGLEVEL_ERROR, "MQTT: %s=\"%s\" is not valid (see docs/MQTT.md); MQTT is off.",
+               bad, getenv(bad) ? getenv(bad) : "");
+    free(m);
+    return;
+  }
+  papplCopyString(m->host, br.host, sizeof m->host);
+  m->port = br.port;
+  m->tls = br.tls;
+  /* PAPPL 1.3's log drops the last digit of numbers: the port is logged as text */
+  snprintf(m->broker, sizeof m->broker, strchr(m->host, ':') ? "%s://[%s]:%d" : "%s://%s:%d",
+           m->tls ? "mqtts" : "mqtt", m->host, m->port);
+
+  int insecure = sp211_parse_bool(getenv("MQTT_TLS_INSECURE"), 0);
+  if (insecure < 0) {
+    papplLog(system, PAPPL_LOGLEVEL_ERROR, "MQTT: MQTT_TLS_INSECURE=\"%s\" is not valid (yes or no); MQTT is off.",
+             getenv("MQTT_TLS_INSECURE"));
+    free(m);
+    return;
+  }
+  m->tls_insecure = insecure;
+  static const struct {
+    const char *name;
+    size_t offset;
+  } files[] = {
+    {"MQTT_CA_FILE", offsetof(mqtt_t, ca_file)},
+    {"MQTT_CERT_FILE", offsetof(mqtt_t, cert_file)},
+    {"MQTT_KEY_FILE", offsetof(mqtt_t, key_file)},
+  };
+  for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+    if (!(v = getenv(files[i].name)) || !*v) continue;
+    if (access(v, R_OK)) {
+      papplLog(system, PAPPL_LOGLEVEL_ERROR, "MQTT: %s=\"%s\": %s; MQTT is off.", files[i].name, v,
+               strerror(errno));
+      free(m);
+      return;
+    }
+    papplCopyString((char *)m + files[i].offset, v, sizeof m->ca_file);
+  }
+  if (!m->cert_file[0] != !m->key_file[0]) {
+    papplLog(system, PAPPL_LOGLEVEL_ERROR,
+             "MQTT: MQTT_CERT_FILE and MQTT_KEY_FILE go together; MQTT is off.");
+    free(m);
+    return;
+  }
+  if (!m->tls && (m->ca_file[0] || m->cert_file[0]))
+    papplLog(system, PAPPL_LOGLEVEL_WARN,
+             "MQTT: certificates are set but TLS is off (use mqtts:// or MQTT_TLS=yes).");
+
   if ((v = getenv("MQTT_USERNAME")) != NULL) papplCopyString(m->username, v, sizeof m->username);
   if ((v = getenv("MQTT_PASSWORD")) != NULL) papplCopyString(m->password, v, sizeof m->password);
   papplCopyString(m->prefix, (v = getenv("MQTT_DISCOVERY_PREFIX")) && *v ? v : "homeassistant",
@@ -760,7 +833,9 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
     return;
   }
   pthread_detach(tid);
-  papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s:%d.", m->host, m->port);
+  papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s, user %s%s.", m->broker,
+           m->username[0] ? m->username : "(none)",
+           !m->tls ? "" : m->tls_insecure ? ", TLS without name check" : ", TLS");
 }
 
 #endif /* HAVE_MOSQUITTO */

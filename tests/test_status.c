@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "sp211_config.h"
 #include "sp211_json.h"
 #include "sp211_power.h"
 #include "sp211_status.h"
@@ -241,6 +242,56 @@ static void test_power(void) {
   CHECK(!sp211_power_step(&p, false, true, t + 100001) && !p.on);
 }
 
+static void test_broker(void) {
+  sp211_broker b;
+  const char *err;
+
+  CHECK(sp211_parse_broker(NULL, NULL, NULL, &b, &err) == 0 && !err);
+  CHECK(sp211_parse_broker("  ", NULL, NULL, &b, &err) == 0 && !err);
+
+  CHECK(sp211_parse_broker("192.168.1.52", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "192.168.1.52") && b.port == 1883 && !b.tls);
+  CHECK(sp211_parse_broker(" broker.lan:1884 ", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "broker.lan") && b.port == 1884 && !b.tls);
+  CHECK(sp211_parse_broker("192.168.1.52", " 1885 ", NULL, &b, &err) == 1 && b.port == 1885);
+  CHECK(sp211_parse_broker("192.168.1.52:1884", "1885", NULL, &b, &err) == 1 && b.port == 1885);
+  CHECK(sp211_parse_broker("192.168.1.52", "", NULL, &b, &err) == 1 && b.port == 1883);
+
+  /* schemes */
+  CHECK(sp211_parse_broker("mqtts://ha.lan", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "ha.lan") && b.port == 8883 && b.tls);
+  CHECK(sp211_parse_broker("MQTTS://ha.lan:9883/", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "ha.lan") && b.port == 9883 && b.tls);
+  CHECK(sp211_parse_broker("mqtt://ha.lan", NULL, NULL, &b, &err) == 1 && b.port == 1883 && !b.tls);
+  CHECK(sp211_parse_broker("ha.lan", NULL, "yes", &b, &err) == 1 && b.port == 8883 && b.tls);
+  CHECK(sp211_parse_broker("mqtts://ha.lan", NULL, "no", &b, &err) == 1 && b.port == 1883 && !b.tls);
+  CHECK(sp211_parse_broker("ha.lan", "8884", "true", &b, &err) == 1 && b.port == 8884 && b.tls);
+
+  /* IPv6 */
+  CHECK(sp211_parse_broker("[fd00::5]:1884", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "fd00::5") && b.port == 1884);
+  CHECK(sp211_parse_broker("mqtts://[fd00::5]", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "fd00::5") && b.port == 8883 && b.tls);
+  CHECK(sp211_parse_broker("fd00::5", NULL, NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, "fd00::5") && b.port == 1883);
+
+  /* errors name the variable */
+  CHECK(sp211_parse_broker("ha.lan:port", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("ha.lan:0", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("ha.lan:", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker(":1883", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("http://ha.lan", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("mqtt://", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("[fd00::5", NULL, NULL, &b, &err) == -1 && !strcmp(err, "MQTT_HOST"));
+  CHECK(sp211_parse_broker("ha.lan", "65536", NULL, &b, &err) == -1 && !strcmp(err, "MQTT_PORT"));
+  CHECK(sp211_parse_broker("ha.lan", "18 83", NULL, &b, &err) == -1 && !strcmp(err, "MQTT_PORT"));
+  CHECK(sp211_parse_broker("ha.lan", NULL, "maybe", &b, &err) == -1 && !strcmp(err, "MQTT_TLS"));
+
+  CHECK(sp211_parse_bool("Yes", 0) == 1 && sp211_parse_bool("OFF", 1) == 0);
+  CHECK(sp211_parse_bool(NULL, 1) == 1 && sp211_parse_bool(" ", 0) == 0);
+  CHECK(sp211_parse_bool("2", 0) == -1);
+}
+
 int main(void) {
   from_hex(IDLE_HEX, IDLE, 64);
   from_hex(PAPER_OUT_HEX, PAPER_OUT, 64);
@@ -251,6 +302,7 @@ int main(void) {
   test_internal_page();
   test_json();
   test_power();
+  test_broker();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }
