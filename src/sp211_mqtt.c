@@ -17,8 +17,9 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #include <ctype.h>
 #include <errno.h>
 #include <mosquitto.h>
-#include <stddef.h>
 #include <pthread.h>
+#include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #include "sp211_usb.h"
 
 #define DRIVER_NAME "ricoh_sp211"
-#define TICK_SECONDS 2       /* how often the printer's state is gathered */
+#define TICK_SECONDS 2       /* mqtt_timer() period: how often the printer's state is gathered */
 #define RECONNECT_MAX 60     /* seconds between two connection attempts, at most */
 #define POLL_SOON_EVERY 30   /* seconds between two "read the printer soon" requests */
 #define SYSTEM_CA_PATH "/etc/ssl/certs" /* Debian's certificate authorities (ca-certificates) */
@@ -71,17 +72,34 @@ typedef struct {
   char uid[96];           /* stable part of unique ids: USB serial or node */
   char serial[64];
 
-  /* state */
+  /* the MQTT thread only */
   bool socket_up;         /* a connection to the broker is open or being set up */
   bool connected;         /* the broker accepted it */
   time_t next_connect;
   int backoff;
   bool republish;         /* discovery and state must be sent again */
-  char *last_state;
+  char *last_state;       /* as last published */
   char *last_discovery;
+
+  /* mqtt_timer() only (PAPPL's main loop) */
+  bool timer_ready;       /* the printer was found and the fields above set */
   sp211_power power;
   char page_request[24];  /* SP211_PAGE_TEST or SP211_PAGE_MAINTENANCE, "" if none */
   time_t last_poll_soon;
+
+  /* shared, under lock */
+  pthread_mutex_t lock;
+  bool ready;             /* printer fields set: the MQTT thread may connect */
+  char *state_json;       /* latest state message, from mqtt_timer() */
+  char *discovery_json;   /* latest discovery message, from mqtt_timer() */
+  int cmd_power, cmd_auto_on, cmd_auto_off; /* commands: -1 none, else 0 or 1 */
+  int cmd_delay;          /* 0: none */
+  char cmd_page[24];
+  struct {
+    pappl_loglevel_t level;
+    char text[320];
+  } logq[16];             /* log messages of the MQTT thread */
+  int logq_n, logq_lost;
 } mqtt_t;
 
 /* ---- settings ------------------------------------------------------------ */
@@ -497,25 +515,48 @@ static void build_discovery(mqtt_t *m, const char *firmware, sp211_buf *b) {
   sp211_buf_cat(b, "}}");
 }
 
-/* ---- MQTT ------------------------------------------------------------------ */
+/* ---- MQTT: the network thread ----------------------------------------------
+ * The thread below never calls PAPPL: PAPPL may be shutting down, or not
+ * running yet, at any moment. It only talks to the broker, publishes what
+ * mqtt_timer() prepared, hands the commands it receives to mqtt_timer(), and
+ * leaves its log messages to it. When the process ends, the broker publishes
+ * the last will ("offline"). */
+
+/* Queues a log message; mqtt_timer() writes it to PAPPL's log. */
+static void tlog(mqtt_t *m, pappl_loglevel_t level, const char *fmt, ...)
+    __attribute__((format(printf, 3, 4)));
+static void tlog(mqtt_t *m, pappl_loglevel_t level, const char *fmt, ...) {
+  va_list ap;
+  pthread_mutex_lock(&m->lock);
+  if (m->logq_n < (int)(sizeof m->logq / sizeof m->logq[0])) {
+    m->logq[m->logq_n].level = level;
+    va_start(ap, fmt);
+    vsnprintf(m->logq[m->logq_n].text, sizeof m->logq[0].text, fmt, ap);
+    va_end(ap);
+    m->logq_n++;
+  } else {
+    m->logq_lost++;
+  }
+  pthread_mutex_unlock(&m->lock);
+}
 
 static void publish(mqtt_t *m, const char *topic, const char *payload, bool retain) {
   int rc = mosquitto_publish(m->mosq, NULL, topic, (int)strlen(payload), payload, 1, retain);
   if (rc != MOSQ_ERR_SUCCESS)
-    papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: cannot publish %s: %s", topic, mosquitto_strerror(rc));
+    tlog(m, PAPPL_LOGLEVEL_WARN, "MQTT: cannot publish %s: %s", topic, mosquitto_strerror(rc));
 }
 
 static void on_connect(struct mosquitto *mosq, void *data, int rc) {
   mqtt_t *m = data;
   if (rc) {
     /* rc 4 and 5: bad user name or password, not authorized (MQTT 3.1.1) */
-    papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: connection refused by %s: %s%s", m->broker,
-             mosquitto_connack_string(rc),
-             rc == 4 || rc == 5 ? " (check MQTT_USERNAME and MQTT_PASSWORD)" : "");
+    tlog(m, PAPPL_LOGLEVEL_ERROR, "MQTT: connection refused by %s: %s%s", m->broker,
+         mosquitto_connack_string(rc),
+         rc == 4 || rc == 5 ? " (check MQTT_USERNAME and MQTT_PASSWORD)" : "");
     return;
   }
   char topic[sizeof m->base + 16];
-  papplLog(m->system, PAPPL_LOGLEVEL_INFO, "MQTT: connected to %s.", m->broker);
+  tlog(m, PAPPL_LOGLEVEL_INFO, "MQTT: connected to %s.", m->broker);
   m->connected = true;
   m->backoff = 0;
   snprintf(topic, sizeof topic, "%s/set/+", m->base);
@@ -536,8 +577,7 @@ static void on_connect(struct mosquitto *mosq, void *data, int rc) {
 static void on_disconnect(struct mosquitto *mosq, void *data, int rc) {
   (void)mosq;
   mqtt_t *m = data;
-  if (m->connected)
-    papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: disconnected (%s).", mosquitto_strerror(rc));
+  if (m->connected) tlog(m, PAPPL_LOGLEVEL_WARN, "MQTT: disconnected (%s).", mosquitto_strerror(rc));
   m->connected = false;
 }
 
@@ -560,37 +600,32 @@ static void on_message(struct mosquitto *mosq, void *data, const struct mosquitt
   size_t blen = strlen(m->base);
   if (strncmp(msg->topic, m->base, blen) || strncmp(msg->topic + blen, "/set/", 5)) return;
   const char *what = msg->topic + blen + 5;
-  time_t now = time(NULL);
   int on = sp211_parse_bool(payload, -1); /* ON/OFF, yes/no, true/false, 1/0; -1 otherwise */
+  bool ok = true;
 
+  pthread_mutex_lock(&m->lock);
   if (!strcmp(what, "power") && on >= 0) {
-    sp211_power_set(&m->power, on, now);
+    m->cmd_power = on;
   } else if (!strcmp(what, "auto_on") && on >= 0) {
-    m->power.auto_on = on;
-    save_settings(m);
+    m->cmd_auto_on = on;
   } else if (!strcmp(what, "auto_off") && on >= 0) {
-    m->power.auto_off = on;
-    save_settings(m);
+    m->cmd_auto_off = on;
   } else if (!strcmp(what, "delay")) {
     char *end;
     double v = strtod(payload, &end);
     while (*end == ' ') end++;
-    if (end == payload || *end) goto ignored;
-    m->power.delay_min = sp211_power_clamp_delay((long)(v + 0.5));
-    save_settings(m);
+    if (end == payload || *end) ok = false;
+    else m->cmd_delay = sp211_power_clamp_delay((long)(v + 0.5));
   } else if (!strcmp(what, "print") && !strcmp(payload, "test")) {
-    papplCopyString(m->page_request, SP211_PAGE_TEST, sizeof m->page_request);
+    papplCopyString(m->cmd_page, SP211_PAGE_TEST, sizeof m->cmd_page);
   } else if (!strcmp(what, "print") && !strcmp(payload, "maintenance")) {
-    papplCopyString(m->page_request, SP211_PAGE_MAINTENANCE, sizeof m->page_request);
+    papplCopyString(m->cmd_page, SP211_PAGE_MAINTENANCE, sizeof m->cmd_page);
   } else {
-    goto ignored;
+    ok = false;
   }
-  m->republish = true; /* answer at the next tick: the sender waits for the new state */
-  return;
-
-ignored:
-  papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: ignored %s=\"%s\" (see docs/MQTT.md).", msg->topic,
-           payload);
+  pthread_mutex_unlock(&m->lock);
+  if (!ok)
+    tlog(m, PAPPL_LOGLEVEL_WARN, "MQTT: ignored %s=\"%s\" (see docs/MQTT.md).", msg->topic, payload);
 }
 
 /* Lower-case letters, digits and underscores: a valid MQTT topic level and
@@ -634,7 +669,7 @@ static void setup_printer(mqtt_t *m, pappl_printer_t *printer) {
 }
 
 /* Opens the connection; the broker's answer arrives in on_connect(). Returns
- * true when the connection is being set up. */
+ * true when the connection is being set up. MQTT thread. */
 static bool connect_broker(mqtt_t *m) {
   char topic[sizeof m->base + 16];
   int rc;
@@ -651,8 +686,8 @@ static bool connect_broker(mqtt_t *m) {
                              m->key_file[0] ? m->key_file : NULL, NULL);
       if (rc == MOSQ_ERR_SUCCESS && m->tls_insecure) rc = mosquitto_tls_insecure_set(m->mosq, true);
       if (rc != MOSQ_ERR_SUCCESS) {
-        papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: TLS set-up failed: %s",
-                 rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
+        tlog(m, PAPPL_LOGLEVEL_ERROR, "MQTT: TLS set-up failed: %s",
+             rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
         mosquitto_destroy(m->mosq);
         m->mosq = NULL;
         return false;
@@ -665,13 +700,13 @@ static bool connect_broker(mqtt_t *m) {
     mosquitto_message_callback_set(m->mosq, on_message);
     rc = mosquitto_connect(m->mosq, m->host, m->port, 60);
     if (rc != MOSQ_ERR_SUCCESS)
-      papplLog(m->system, PAPPL_LOGLEVEL_ERROR, "MQTT: cannot connect to %s: %s", m->broker,
-               rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
+      tlog(m, PAPPL_LOGLEVEL_ERROR, "MQTT: cannot connect to %s: %s", m->broker,
+           rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
   } else {
     rc = mosquitto_reconnect(m->mosq);
     if (rc != MOSQ_ERR_SUCCESS)
-      papplLog(m->system, PAPPL_LOGLEVEL_DEBUG, "MQTT: reconnect failed: %s",
-               rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
+      tlog(m, PAPPL_LOGLEVEL_DEBUG, "MQTT: reconnect failed: %s",
+           rc == MOSQ_ERR_ERRNO ? strerror(errno) : mosquitto_strerror(rc));
   }
   return rc == MOSQ_ERR_SUCCESS;
 }
@@ -683,32 +718,25 @@ static void back_off(mqtt_t *m) {
   m->next_connect = time(NULL) + m->backoff;
 }
 
-static void publish_if_changed(mqtt_t *m, const char *topic, sp211_buf *b, char **last) {
-  if (b->failed) return;
-  if (!m->republish && *last && !strcmp(*last, sp211_buf_text(b))) return;
-  publish(m, topic, sp211_buf_text(b), true);
+static void publish_if_changed(mqtt_t *m, const char *topic, const char *text, char **last) {
+  if (!m->republish && *last && !strcmp(*last, text)) return;
+  publish(m, topic, text, true);
   free(*last);
-  *last = strdup(sp211_buf_text(b));
+  *last = strdup(text);
 }
 
 static void *mqtt_thread(void *data) {
   mqtt_t *m = data;
-  pappl_printer_t *printer = NULL;
-  time_t next_tick = 0;
-
-  while (!papplSystemIsRunning(m->system) && !papplSystemIsShutdown(m->system)) sleep(1);
-
-  while (!papplSystemIsShutdown(m->system) && papplSystemIsRunning(m->system)) {
-    time_t now = time(NULL);
-    if (!printer) {
-      if ((printer = find_printer(m)) == NULL) {
-        sleep(TICK_SECONDS); /* no printer added yet */
-        continue;
-      }
-      setup_printer(m, printer);
-      papplLog(m->system, PAPPL_LOGLEVEL_INFO, "MQTT: publishing printer \"%s\" under %s.",
-               m->printer_name, m->base);
+  for (;;) {
+    pthread_mutex_lock(&m->lock);
+    bool ready = m->ready;
+    pthread_mutex_unlock(&m->lock);
+    if (!ready) { /* mqtt_timer() has not found the printer yet */
+      usleep(500000);
+      continue;
     }
+
+    time_t now = time(NULL);
     if (!m->socket_up && now >= m->next_connect) {
       m->socket_up = connect_broker(m);
       if (!m->socket_up) back_off(m);
@@ -717,56 +745,118 @@ static void *mqtt_thread(void *data) {
       int rc = mosquitto_loop(m->mosq, 250, 1);
       if (rc != MOSQ_ERR_SUCCESS) {
         /* lost, or refused by the broker (on_connect logged why) */
-        if (m->connected)
-          papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: connection lost (%s).", mosquitto_strerror(rc));
+        if (m->connected) tlog(m, PAPPL_LOGLEVEL_WARN, "MQTT: connection lost (%s).", mosquitto_strerror(rc));
         m->socket_up = m->connected = false;
         back_off(m);
       }
     } else {
       usleep(250000);
     }
+    if (!m->connected) continue;
 
-    now = time(NULL);
-    if (!m->republish && now < next_tick) continue;
-    next_tick = now + TICK_SECONDS;
-
-    /* the printer may have been deleted or replaced */
-    pappl_printer_t *current = find_printer(m);
-    if (current != printer) {
-      printer = NULL;
-      continue;
+    /* publish what mqtt_timer() prepared, when it changed */
+    char *state = NULL, *disc = NULL;
+    pthread_mutex_lock(&m->lock);
+    if (m->state_json) state = strdup(m->state_json);
+    if (m->discovery && m->discovery_json) disc = strdup(m->discovery_json);
+    pthread_mutex_unlock(&m->lock);
+    char topic[sizeof m->base + sizeof m->prefix + sizeof m->uid];
+    if (disc) {
+      snprintf(topic, sizeof topic, "%s/device/%s/config", m->prefix, m->uid);
+      publish_if_changed(m, topic, disc, &m->last_discovery);
     }
-
-    sp211_buf state = {0};
-    build_state(m, printer, &state);
-    if (m->connected) {
-      char topic[sizeof m->base + 16];
-      if (m->discovery) {
-        sp211_app_status st;
-        sp211_app_get_status(&st);
-        sp211_buf disc = {0};
-        build_discovery(m, st.firmware, &disc);
-        snprintf(topic, sizeof topic, "%s/device/%s/config", m->prefix, m->uid);
-        publish_if_changed(m, topic, &disc, &m->last_discovery);
-        sp211_buf_free(&disc);
-      }
+    if (state) {
       snprintf(topic, sizeof topic, "%s/state", m->base);
-      publish_if_changed(m, topic, &state, &m->last_state);
+      publish_if_changed(m, topic, state, &m->last_state);
       m->republish = false;
     }
-    sp211_buf_free(&state);
-  }
-
-  /* shutting down: say so, so that Home Assistant shows the printer as
-   * unavailable rather than idle */
-  if (m->mosq && m->connected) {
-    char topic[sizeof m->base + 16];
-    snprintf(topic, sizeof topic, "%s/availability", m->base);
-    mosquitto_publish(m->mosq, NULL, topic, 7, "offline", 1, true);
-    for (int i = 0; i < 4; i++) mosquitto_loop(m->mosq, 100, 1);
-    mosquitto_disconnect(m->mosq);
+    free(state);
+    free(disc);
   }
   return NULL;
+}
+
+/* ---- MQTT: the PAPPL side --------------------------------------------------
+ * mqtt_timer() runs on PAPPL's main loop, only while PAPPL runs: it is the
+ * only place that reads the printer and applies commands. */
+
+static void drain_log(mqtt_t *m) {
+  int n, lost;
+  static struct {
+    pappl_loglevel_t level;
+    char text[320];
+  } q[16]; /* only mqtt_timer() uses it */
+  pthread_mutex_lock(&m->lock);
+  n = m->logq_n;
+  lost = m->logq_lost;
+  for (int i = 0; i < n; i++) {
+    q[i].level = m->logq[i].level;
+    memcpy(q[i].text, m->logq[i].text, sizeof q[i].text);
+  }
+  m->logq_n = m->logq_lost = 0;
+  pthread_mutex_unlock(&m->lock);
+  for (int i = 0; i < n; i++) papplLog(m->system, q[i].level, "%s", q[i].text);
+  if (lost) papplLog(m->system, PAPPL_LOGLEVEL_WARN, "MQTT: some log messages were lost.");
+}
+
+static bool mqtt_timer(pappl_system_t *system, void *data) {
+  (void)system;
+  mqtt_t *m = data;
+  drain_log(m);
+
+  pappl_printer_t *printer = find_printer(m);
+  if (!printer) return true; /* no printer added yet */
+  if (!m->timer_ready) {
+    setup_printer(m, printer);
+    papplLog(m->system, PAPPL_LOGLEVEL_INFO, "MQTT: publishing printer \"%s\" under %s.",
+             m->printer_name, m->base);
+    m->timer_ready = true;
+    pthread_mutex_lock(&m->lock);
+    m->ready = true; /* the MQTT thread may now use base, uid... */
+    pthread_mutex_unlock(&m->lock);
+  }
+
+  /* commands received by the MQTT thread */
+  int power, auto_on, auto_off, delay;
+  char page[sizeof m->cmd_page];
+  pthread_mutex_lock(&m->lock);
+  power = m->cmd_power;
+  auto_on = m->cmd_auto_on;
+  auto_off = m->cmd_auto_off;
+  delay = m->cmd_delay;
+  papplCopyString(page, m->cmd_page, sizeof page);
+  m->cmd_power = m->cmd_auto_on = m->cmd_auto_off = -1;
+  m->cmd_delay = 0;
+  m->cmd_page[0] = '\0';
+  pthread_mutex_unlock(&m->lock);
+  if (power >= 0) sp211_power_set(&m->power, power, time(NULL));
+  if (auto_on >= 0) m->power.auto_on = auto_on;
+  if (auto_off >= 0) m->power.auto_off = auto_off;
+  if (delay > 0) m->power.delay_min = delay;
+  if (auto_on >= 0 || auto_off >= 0 || delay > 0) save_settings(m);
+  if (page[0]) papplCopyString(m->page_request, page, sizeof m->page_request);
+
+  sp211_buf state = {0}, disc = {0};
+  build_state(m, printer, &state);
+  if (m->discovery) {
+    sp211_app_status st;
+    sp211_app_get_status(&st);
+    build_discovery(m, st.firmware, &disc);
+  }
+  pthread_mutex_lock(&m->lock);
+  if (!state.failed && (!m->state_json || strcmp(m->state_json, sp211_buf_text(&state)))) {
+    free(m->state_json);
+    m->state_json = strdup(sp211_buf_text(&state));
+  }
+  if (m->discovery && !disc.failed &&
+      (!m->discovery_json || strcmp(m->discovery_json, sp211_buf_text(&disc)))) {
+    free(m->discovery_json);
+    m->discovery_json = strdup(sp211_buf_text(&disc));
+  }
+  pthread_mutex_unlock(&m->lock);
+  sp211_buf_free(&state);
+  sp211_buf_free(&disc);
+  return true;
 }
 
 void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
@@ -776,6 +866,8 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
   mqtt_t *m = calloc(1, sizeof *m);
   if (!m) return;
   m->system = system;
+  pthread_mutex_init(&m->lock, NULL);
+  m->cmd_power = m->cmd_auto_on = m->cmd_auto_off = -1;
   const char *v, *bad;
   sp211_broker br;
   if (sp211_parse_broker(host, getenv("MQTT_PORT"), getenv("MQTT_TLS"), &br, &bad) <= 0) {
@@ -852,6 +944,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
     return;
   }
   pthread_detach(tid);
+  papplSystemAddTimerCallback(system, time(NULL) + 1, TICK_SECONDS, mqtt_timer, m);
   papplLog(system, PAPPL_LOGLEVEL_INFO, "MQTT: broker %s, user %s%s%s.", m->broker,
            m->username[0] ? m->username : "(none)",
            !m->tls ? "" : m->tls_insecure ? ", TLS without name check" : ", TLS",

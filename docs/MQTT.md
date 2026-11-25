@@ -158,7 +158,7 @@ log usually says more.
 
 | Topic | Direction | Retained | Payload |
 |---|---|---|---|
-| `BASE/availability` | published | yes | `online` while the application runs; `offline` when it stops, also sent by the broker if the connection is lost (last will) |
+| `BASE/availability` | published | yes | `online` while the application is connected; `offline`, published by the broker (last will) when the application stops or its connection is lost |
 | `BASE/state` | published | yes | the printer's state, JSON, below |
 | `BASE/set/power` | listened to | | `ON` or `OFF` |
 | `BASE/set/auto_on` | listened to | | `ON` or `OFF` |
