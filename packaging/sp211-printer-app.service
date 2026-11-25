@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# systemd service for the Ricoh SP 211 Printer Application.
+# Installed by "make install-printer-app", which replaces @BINDIR@.
+#
+# Port 631 is the IPP port, free on a machine without CUPS. If CUPS runs on
+# the same machine, pick another port with "systemctl edit sp211-printer-app".
+
+[Unit]
+Description=Ricoh SP 211 Printer Application (IPP Everywhere)
+Documentation=https://www.msweet.org/pappl/
+After=network-online.target avahi-daemon.service
+Wants=network-online.target avahi-daemon.service
+
+[Service]
+Type=simple
+StateDirectory=sp211-printer-app
+ExecStart=@BINDIR@/sp211-printer-app server -o server-port=631 -o spool-directory=/var/lib/sp211-printer-app -o log-file=- -o log-level=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
