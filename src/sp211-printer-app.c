@@ -288,8 +288,8 @@ static time_t status_last;       /* last read attempt */
 static time_t poll_until;        /* read every STATUS_TICK seconds until then */
 static bool misfeeds_due = true; /* read the misfeed counters at the next read */
 static sp211_app_status app_status = {.toner_percent = -1};
+static int offline_reads;        /* consecutive reads that found no printer, whoever asked */
 /* used by status_timer() only */
-static int offline_reads;    /* consecutive reads that found no printer */
 static bool stopped_offline; /* we stopped the printer because it could not be reached */
 
 void sp211_app_get_status(sp211_app_status *st) {
@@ -338,11 +338,13 @@ static status_result_t update_status(pappl_printer_t *printer, bool force) {
   if (!sp211_usb_read_counters(papplPrinterGetDeviceURI(printer), misfeeds_due, &c)) {
     /* switched off, unplugged, or no permission on the USB device */
     app_status.online = false;
+    offline_reads++;
     papplPrinterSetReasons(printer, PAPPL_PREASON_OFFLINE, PAPPL_PREASON_NONE);
     pthread_mutex_unlock(&status_lock);
     return STATUS_OFFLINE;
   }
   app_status.online = true;
+  offline_reads = 0;
   pappl_preason_t add = PAPPL_PREASON_NONE, remove = PAPPL_PREASON_OFFLINE;
   if (c.toner_percent >= 0) {
     app_status.toner_percent = c.toner_percent;
@@ -419,11 +421,13 @@ static void status_each_printer(pappl_printer_t *printer, void *data) {
   if (t->due) t->result = update_status(printer, true);
 }
 
-/* Runs every STATUS_TICK seconds and reads the printer every STATUS_TIMER
- * seconds, or every tick while sp211_app_poll_soon() asked for it. The
- * printer is stopped when two reads in a row cannot reach it (jobs then wait
- * in the queue) and resumed when it answers again; a printer that someone
- * else stopped is left alone. PAPPL runs timers under the system read lock,
+/* Runs every STATUS_TICK seconds and reads the printer when nobody else did
+ * for STATUS_TIMER seconds, or every tick while sp211_app_poll_soon() asked
+ * for it. Reads also happen when clients ask for the printer's state
+ * (app_status_cb(), every 30 s at most): whoever made them, two reads in a
+ * row that cannot reach the printer stop it (jobs then wait in the queue),
+ * and a read that reaches it again resumes it; a printer that someone else
+ * stopped is left alone. PAPPL runs timers under the system read lock,
  * which pause and resume do not take. */
 static bool status_timer(pappl_system_t *system, void *data) {
   (void)data;
@@ -433,16 +437,18 @@ static bool status_timer(pappl_system_t *system, void *data) {
   t.due = now - status_last >= STATUS_TIMER || (now < poll_until && now - status_last >= STATUS_TICK);
   pthread_mutex_unlock(&status_lock);
   papplSystemIteratePrinters(system, status_each_printer, &t);
-  if (!t.printer || t.result == STATUS_SKIPPED) return true;
+  if (!t.printer) return true;
 
-  if (t.result == STATUS_OFFLINE) offline_reads++;
-  else offline_reads = 0;
+  pthread_mutex_lock(&status_lock);
+  int failed = offline_reads;
+  bool answers = app_status.read && app_status.online;
+  pthread_mutex_unlock(&status_lock);
 
-  if (offline_reads >= 2 && papplPrinterGetState(t.printer) == IPP_PSTATE_IDLE) {
+  if (failed >= 2 && papplPrinterGetState(t.printer) == IPP_PSTATE_IDLE) {
     papplLogPrinter(t.printer, PAPPL_LOGLEVEL_INFO, "Printer not reachable, stopping the queue.");
     papplPrinterPause(t.printer);
     stopped_offline = true;
-  } else if (t.result == STATUS_ONLINE && stopped_offline) {
+  } else if (answers && stopped_offline) {
     stopped_offline = false;
     if (papplPrinterGetState(t.printer) == IPP_PSTATE_STOPPED) {
       papplLogPrinter(t.printer, PAPPL_LOGLEVEL_INFO, "Printer reachable again, resuming the queue.");
