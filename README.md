@@ -152,12 +152,22 @@ Tested on one printer: Ricoh SP 211, firmware V1.06, Debian 13, PAPPL 1.3.1.
 
 ### Known limits
 
-Data is written to the printer in pieces of 2 KB. PAPPL's papplDeviceWrite()
-sends a zero-length USB transfer when given more than its 8 KB buffer while
-the buffer is empty; the SP 211 then keeps the job without printing it and
-refuses all further data until it is switched off and on. PAPPL fixed this
-after 1.4.12 ([issue #434](https://github.com/michaelrsweet/pappl/issues/434));
-no release contains the fix yet, and Debian 13 ships 1.3.1.
+The application has its own USB access (`src/sp211_usbdev.c`) in place of
+PAPPL's, for the `usb://` device URIs, which it builds the same way. PAPPL's
+keeps one libusb context for the life of the process and learns about
+devices that come and go from udev; in a container those events never
+arrive, so after the printer was switched off and on (it then comes back
+under a new USB device number) a job waiting for it retried forever. The
+application's USB access looks the devices up again at every open. It is the
+only device type it offers: no network or file devices.
+
+Data is written to the printer in pieces of 2 KB, and the USB access never
+sends a zero-length transfer. PAPPL's papplDeviceWrite() asks for one when
+given more than its 8 KB buffer while the buffer is empty; the SP 211 then
+keeps the job without printing it and refuses all further data until it is
+switched off and on. PAPPL fixed this after 1.4.12
+([issue #434](https://github.com/michaelrsweet/pappl/issues/434)); no
+release contains the fix yet, and Debian 13 ships 1.3.1.
 
 `printer-impressions-completed` follows the printer's own counter upwards
 only: PAPPL counts the pages of a job that failed, and its API cannot lower

@@ -40,6 +40,7 @@
 #include "sp211_mqtt.h"
 #include "sp211_status.h"
 #include "sp211_usb.h"
+#include "sp211_usbdev.h"
 
 #define VERSION SP211_APP_VERSION
 #define DRIVER_NAME "ricoh_sp211"
@@ -615,6 +616,10 @@ static pappl_system_t *system_cb(int num_options, cups_option_t *options, void *
 }
 
 int main(int argc, char *argv[]) {
+  /* our "usb" device scheme, in place of PAPPL's: it sees a printer that
+   * was switched off and on again (see src/sp211_usbdev.h). Before anything
+   * lists or opens a device. */
+  sp211_usbdev_register();
   return papplMainloop(argc, argv, VERSION, NULL, (int)COUNT(drivers), drivers, autoadd_cb,
                        driver_cb, NULL, NULL, system_cb, NULL, NULL);
 }

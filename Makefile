@@ -17,7 +17,7 @@ STATUS  = src/sp211_status.c src/sp211_usb.c src/sp211_power.c src/sp211_json.c 
           src/sp211_config.c
 HEADERS = src/lilo2.h src/dither_matrix.h src/sp211_status.h src/sp211_usb.h \
           src/sp211_power.h src/sp211_json.h src/sp211_app.h src/sp211_mqtt.h \
-          src/sp211_config.h
+          src/sp211_config.h src/sp211_usbdev.h
 
 CFLAGS  ?= -O2 -Wall -Wextra
 
@@ -35,10 +35,12 @@ endif
 
 all: build/sp211-printer-app build/lilo2check
 
-build/sp211-printer-app: src/sp211-printer-app.c src/sp211_mqtt.c $(ENCODER) $(STATUS) $(HEADERS)
+APP_SRC = src/sp211-printer-app.c src/sp211_mqtt.c src/sp211_usbdev.c
+
+build/sp211-printer-app: $(APP_SRC) $(ENCODER) $(STATUS) $(HEADERS)
 	mkdir -p build
 	$(CC) $(CFLAGS) -Isrc -I$(JBIG) $(PAPPL_CFLAGS) $(USB_CFLAGS) $(MQTT_CFLAGS) -o $@ \
-	    src/sp211-printer-app.c src/sp211_mqtt.c $(ENCODER) $(STATUS) \
+	    $(APP_SRC) $(ENCODER) $(STATUS) \
 	    $(PAPPL_LIBS) $(USB_LIBS) $(MQTT_LIBS) -lpthread
 
 # Decodes a printer stream and reports what is on each page.
