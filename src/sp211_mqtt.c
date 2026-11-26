@@ -37,6 +37,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #define TICK_SECONDS 2       /* mqtt_timer() period: how often the printer's state is gathered */
 #define RECONNECT_MAX 60     /* seconds between two connection attempts, at most */
 #define POLL_SOON_EVERY 30   /* seconds between two "read the printer soon" requests */
+#define PAGE_WAIT 180        /* seconds a test or maintenance page waits for the printer */
 #define SYSTEM_CA_PATH "/etc/ssl/certs" /* Debian's certificate authorities (ca-certificates) */
 
 typedef struct {
@@ -85,6 +86,8 @@ typedef struct {
   bool timer_ready;       /* the printer was found and the fields above set */
   sp211_power power;
   char page_request[24];  /* SP211_PAGE_TEST or SP211_PAGE_MAINTENANCE, "" if none */
+  time_t page_since;      /* when it was asked for */
+  bool page_logged;       /* "will print when..." already said */
   time_t last_poll_soon;
 
   /* shared, under lock */
@@ -239,12 +242,15 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
   sp211_app_get_status(&st);
   bool online = st.read ? st.online : !(preasons & PAPPL_PREASON_OFFLINE);
   bool busy = active > 0 || pstate == IPP_PSTATE_PROCESSING;
+  /* a test or maintenance page waiting counts as a job for the power */
+  bool page_wait = m->page_request[0] != '\0';
+  bool needs_power = busy || page_wait;
   time_t now = time(NULL);
 
-  if (sp211_power_step(&m->power, online, busy, now) && m->power.linked)
+  if (sp211_power_step(&m->power, online, needs_power, now) && m->power.linked)
     papplLogPrinter(printer, PAPPL_LOGLEVEL_INFO, "Power %s (%s).", m->power.on ? "on" : "off",
-                    m->power.on ? "a job is waiting" : "nothing to print");
-  if (m->power.linked && m->power.on && !online && busy && now - m->last_poll_soon >= POLL_SOON_EVERY) {
+                    !m->power.on ? "nothing to print" : busy ? "a job is waiting" : "a page was asked for");
+  if (m->power.linked && m->power.on && !online && needs_power && now - m->last_poll_soon >= POLL_SOON_EVERY) {
     sp211_app_poll_soon(); /* the printer is being switched on: watch for it */
     m->last_poll_soon = now;
   }
@@ -325,7 +331,7 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
     sp211_buf_cat(b, "null");
   }
 
-  time_t off_at = sp211_power_off_at(&m->power, busy);
+  time_t off_at = sp211_power_off_at(&m->power, needs_power);
   sp211_buf_printf(b, ",\"power\":\"%s\",\"linked\":%s,\"auto_on\":\"%s\",\"auto_off\":\"%s\",\"delay\":%d,\"off_at\":",
                    m->power.on ? "ON" : "OFF", m->power.linked ? "true" : "false",
                    m->power.auto_on ? "ON" : "OFF", m->power.auto_off ? "ON" : "OFF",
@@ -340,19 +346,28 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
   sp211_buf_json_string(b, st.firmware[0] ? st.firmware : NULL);
   sp211_buf_cat(b, "}");
 
-  /* a test or maintenance page asked for from Home Assistant */
+  /* a test or maintenance page asked for over MQTT: printed when the
+   * printer answers and has nothing else to print (it is switched on as
+   * for a job), or dropped after PAGE_WAIT seconds */
   if (m->page_request[0]) {
-    if (online && !busy && pstate != IPP_PSTATE_STOPPED) {
+    const char *which = strcmp(m->page_request, SP211_PAGE_TEST) ? "maintenance" : "test";
+    bool done = true;
+    if (online && !busy && pstate == IPP_PSTATE_IDLE) {
       bool ok = sp211_usb_print_internal_page(papplPrinterGetDeviceURI(printer), m->page_request);
       papplLogPrinter(printer, ok ? PAPPL_LOGLEVEL_INFO : PAPPL_LOGLEVEL_ERROR,
-                      ok ? "Printing the printer's %s page." : "The printer refused the %s page.",
-                      strcmp(m->page_request, SP211_PAGE_TEST) ? "maintenance" : "test");
-    } else {
+                      ok ? "Printing the printer's %s page." : "The printer refused the %s page.", which);
+    } else if (now - m->page_since >= PAGE_WAIT) {
       papplLogPrinter(printer, PAPPL_LOGLEVEL_WARN,
-                      "Internal page not printed: the printer is %s.",
-                      online ? "busy" : "not reachable");
+                      "The printer's %s page was not printed: the printer %s for 3 minutes.", which,
+                      !online ? "did not answer" : busy ? "was busy" : "was stopped");
+    } else {
+      done = false;
+      if (!m->page_logged)
+        papplLogPrinter(printer, PAPPL_LOGLEVEL_INFO, "The printer's %s page will print when the printer is %s.",
+                        which, !online ? "on" : busy ? "free" : "resumed");
+      m->page_logged = true;
     }
-    m->page_request[0] = '\0';
+    if (done) m->page_request[0] = '\0';
   }
 }
 
@@ -882,7 +897,11 @@ static bool mqtt_timer(pappl_system_t *system, void *data) {
   if (auto_off >= 0) m->power.auto_off = auto_off;
   if (delay > 0) m->power.delay_min = delay;
   if (auto_on >= 0 || auto_off >= 0 || delay > 0) save_settings(m);
-  if (page[0]) papplCopyString(m->page_request, page, sizeof m->page_request);
+  if (page[0]) {
+    papplCopyString(m->page_request, page, sizeof m->page_request);
+    m->page_since = time(NULL);
+    m->page_logged = false;
+  }
 
   sp211_buf state = {0}, disc = {0};
   build_state(m, printer, &state);

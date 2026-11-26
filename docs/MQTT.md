@@ -220,7 +220,7 @@ The new state follows within 2 s.
 | `BASE/set/auto_on` | `ON`, `OFF` | Auto power on when a document arrives. Kept across restarts. |
 | `BASE/set/auto_off` | `ON`, `OFF` | Auto power off after `delay` minutes without a job. Kept across restarts. |
 | `BASE/set/delay` | `1` to `240` | Minutes for auto power off; a decimal is rounded, a value outside the range is brought into it. Kept across restarts. |
-| `BASE/set/print` | `test`, `maintenance` | The printer prints its own test page, or its maintenance page (counters, misfeeds, firmware). Only when the printer is idle and answers; otherwise the command is dropped and the log says why. The page starts about 10 s later. |
+| `BASE/set/print` | `test`, `maintenance` | The printer prints its own test page, or its maintenance page (counters, misfeeds, firmware), about 10 s after it is asked to. If the printer is off, the request counts as a job: auto power on switches it on. The page is asked for as soon as the printer answers and has nothing else to print; after 3 minutes without that, the request is dropped and the log says why. |
 
 Examples:
 
