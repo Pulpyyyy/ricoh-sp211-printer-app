@@ -141,11 +141,11 @@ Tested on one printer: Ricoh SP 211, firmware V1.06, Debian 13, PAPPL 1.3.1.
 | Toner level and toner low | verified: 50 % |
 | Toner empty (`toner-empty` at 0 %) | not tested |
 | Firmware version in `printer-firmware-string-version` | verified: V1.06 first; read at start-up |
-| Queue stopped while the printer cannot be reached, resumed when it answers | not tested |
+| Queue stopped while the printer cannot be reached, resumed when it answers | verified: stopped about 30 s after the printer went off, resumed when it answered again |
 | Page counter as `printer-impressions-completed` | verified |
 | MQTT: device, jobs, counters | verified: device and entities in Home Assistant, last job, page counter, misfeeds |
 | MQTT: test and maintenance pages | not tested |
-| MQTT: auto power on and off through the blueprint | not tested |
+| MQTT: auto power on and off through the blueprint | partly verified: the plug and the switch follow each other, the power-off countdown starts; auto power off and on not observed yet |
 | Out of paper | not yet: the printer only reports it during a job |
 | 1200×600 dpi, manual duplex | not supported yet |
 | Cover open, jams in progress | not available: the printer does not transmit them |
