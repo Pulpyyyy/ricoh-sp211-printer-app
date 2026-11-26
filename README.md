@@ -145,7 +145,7 @@ Tested on one printer: Ricoh SP 211, firmware V1.06, Debian 13, PAPPL 1.3.1.
 | Page counter as `printer-impressions-completed` | verified |
 | MQTT: device, jobs, counters | verified: device and entities in Home Assistant, last job, page counter, misfeeds |
 | MQTT: test and maintenance pages | not tested |
-| MQTT: auto power on and off through the blueprint | partly verified: the plug and the switch follow each other, the power-off countdown starts; auto power off and on not observed yet |
+| MQTT: auto power on and off through the blueprint | verified: auto power off after the delay; a job sent from Windows with the printer off switched it on and printed, 20 s after it was sent |
 | Out of paper | not yet: the printer only reports it during a job |
 | 1200×600 dpi, manual duplex | not supported yet |
 | Cover open, jams in progress | not available: the printer does not transmit them |
