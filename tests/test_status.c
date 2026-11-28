@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Unit tests for sp211_status. No printer needed: the packets below were
- * captured from a Ricoh SP 211 (firmware V1.06).
+ * Unit tests of the parts that need no PAPPL. No printer needed: the packets
+ * below were captured from a Ricoh SP 211 (firmware V1.06).
  *
  *   make test
  */
@@ -12,6 +12,7 @@
 #include "sp211_config.h"
 #include "sp211_json.h"
 #include "sp211_power.h"
+#include "sp211_state.h"
 #include "sp211_status.h"
 #include "sp211_usb.h"
 
@@ -188,6 +189,158 @@ static void test_json(void) {
   CHECK(b.s == NULL && b.len == 0);
 }
 
+/* The JSON string written for text. */
+static int json_is(const char *text, const char *want) {
+  sp211_buf b = {0};
+  sp211_buf_json_string(&b, text);
+  int ok = !b.failed && !strcmp(sp211_buf_text(&b), want) && b.len == strlen(want);
+  if (!ok) fprintf(stderr, "got %s, want %s\n", sp211_buf_text(&b), want);
+  sp211_buf_free(&b);
+  return ok;
+}
+
+static void test_json_strings(void) {
+  CHECK(json_is("", "\"\""));
+  CHECK(json_is("invoice.pdf", "\"invoice.pdf\""));
+  CHECK(json_is("\"", "\"\\\"\""));
+  CHECK(json_is("\\", "\"\\\\\""));
+  CHECK(json_is("C:\\a \"b\".pdf", "\"C:\\\\a \\\"b\\\".pdf\""));
+  CHECK(json_is("\\n", "\"\\\\n\""));               /* two characters, not a newline */
+  CHECK(json_is("a/b 'c'", "\"a/b 'c'\""));          /* nothing to escape */
+  CHECK(json_is("\n\r\t", "\"\\n\\r\\t\""));
+  CHECK(json_is("\b\f\x1b\x1f", "\"\\u0008\\u000c\\u001b\\u001f\""));
+  CHECK(json_is(" \x7f", "\" \x7f\""));              /* not control characters in JSON */
+
+  /* every control character is escaped */
+  for (int c = 1; c < 0x20; c++) {
+    char in[2] = {(char)c, '\0'};
+    sp211_buf b = {0};
+    sp211_buf_json_string(&b, in);
+    const unsigned char *p = (const unsigned char *)sp211_buf_text(&b);
+    while (*p >= 0x20) p++;
+    CHECK(!*p && b.len >= 4 && sp211_buf_text(&b)[1] == '\\');
+    sp211_buf_free(&b);
+  }
+
+  /* UTF-8 of 2, 3 and 4 bytes is kept, and so are invalid bytes */
+  CHECK(json_is("\xc3\xa9t\xc3\xa9 \xe2\x82\xac \xf0\x9f\x96\xa8",
+                "\"\xc3\xa9t\xc3\xa9 \xe2\x82\xac \xf0\x9f\x96\xa8\""));
+  CHECK(json_is("\xff\xc3", "\"\xff\xc3\""));
+}
+
+static void test_json_objects(void) {
+  sp211_buf b = {0};
+  sp211_buf_cat(&b, NULL);                           /* nothing appended */
+  CHECK(!b.failed && b.len == 0 && !strcmp(sp211_buf_text(&b), ""));
+
+  /* nested object and list, appended piece by piece */
+  sp211_buf_printf(&b, "{\"id\":%d,\"name\":", 12);
+  sp211_buf_json_string(&b, "a \"b\"");
+  sp211_buf_cat(&b, ",\"list\":[");
+  sp211_buf_cat(&b, "]}");
+  CHECK(!strcmp(sp211_buf_text(&b), "{\"id\":12,\"name\":\"a \\\"b\\\"\",\"list\":[]}"));
+  sp211_buf_free(&b);
+
+  /* a freed buffer can be used again; one printf larger than the first
+   * allocation, after some text */
+  char long_text[1001];
+  memset(long_text, 'x', 1000);
+  long_text[1000] = '\0';
+  sp211_buf_cat(&b, "[");
+  sp211_buf_printf(&b, "\"%s\"", long_text);
+  sp211_buf_cat(&b, "]");
+  CHECK(!b.failed && b.len == 1004 && strlen(sp211_buf_text(&b)) == 1004);
+  CHECK(!strncmp(sp211_buf_text(&b), "[\"xx", 4) && !strcmp(sp211_buf_text(&b) + 1000, "xx\"]"));
+  sp211_buf_free(&b);
+
+  /* after a failure nothing more is appended */
+  sp211_buf_cat(&b, "{");
+  b.failed = true;
+  sp211_buf_cat(&b, "a");
+  sp211_buf_printf(&b, "%d", 1);
+  sp211_buf_json_string(&b, "b");
+  CHECK(b.failed && !strcmp(sp211_buf_text(&b), "{"));
+  sp211_buf_free(&b);
+  CHECK(!b.failed);
+}
+
+/* The fields of the state message built without PAPPL (docs/MQTT.md, State). */
+static void test_state(void) {
+  CHECK(!strcmp(sp211_state_toner(-1), "unknown"));
+  CHECK(!strcmp(sp211_state_toner(0), "empty"));
+  CHECK(!strcmp(sp211_state_toner(1), "low"));
+  CHECK(!strcmp(sp211_state_toner(10), "low"));
+  CHECK(!strcmp(sp211_state_toner(11), "ok"));
+  CHECK(!strcmp(sp211_state_toner(100), "ok"));
+
+  /* nothing read yet: numbers are null */
+  sp211_app_status st = {.toner_percent = -1};
+  sp211_buf b = {0};
+  sp211_state_supplies(&b, &st);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"toner\":null,\"toner_state\":\"unknown\",\"pages_total\":null,\"misfeeds\":null"));
+  sp211_buf_free(&b);
+
+  /* the values of the example in docs/MQTT.md */
+  st.toner_percent = 9;
+  st.have_pages = true;
+  st.pages = 205;
+  st.have_misfeeds = true;
+  st.misfeeds = 6;
+  sp211_state_supplies(&b, &st);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"toner\":9,\"toner_state\":\"low\",\"pages_total\":205,\"misfeeds\":6"));
+  sp211_buf_free(&b);
+
+  /* zero is a value, not null; the counters are unsigned */
+  st.toner_percent = 0;
+  st.pages = 4294967295u;
+  st.misfeeds = 0;
+  sp211_state_supplies(&b, &st);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"toner\":0,\"toner_state\":\"empty\",\"pages_total\":4294967295,\"misfeeds\":0"));
+  sp211_buf_free(&b);
+
+  char t[40];
+  sp211_state_time(0, t, sizeof t);
+  CHECK(!strcmp(t, "1970-01-01T00:00:00+00:00"));
+  const time_t off = 1795637778; /* 2026-11-25T20:16:18 UTC */
+  sp211_state_time(off, t, sizeof t);
+  CHECK(!strcmp(t, "2026-11-25T20:16:18+00:00"));
+
+  /* no plug linked: off_at is null */
+  sp211_power p;
+  sp211_power_init(&p);
+  sp211_state_power(&b, &p, false);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"power\":\"OFF\",\"linked\":false,\"auto_on\":\"ON\",\"auto_off\":\"ON\","
+                "\"delay\":15,\"off_at\":null"));
+  sp211_buf_free(&b);
+
+  /* linked, on and idle: the example in docs/MQTT.md */
+  sp211_power_set(&p, true, off - 15 * 60);
+  sp211_power_step(&p, true, false, off - 15 * 60);
+  sp211_state_power(&b, &p, false);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"power\":\"ON\",\"linked\":true,\"auto_on\":\"ON\",\"auto_off\":\"ON\","
+                "\"delay\":15,\"off_at\":\"2026-11-25T20:16:18+00:00\""));
+  sp211_buf_free(&b);
+
+  /* busy: no auto off; settings changed */
+  p.auto_on = false;
+  p.delay_min = 240;
+  sp211_state_power(&b, &p, true);
+  CHECK(!strcmp(sp211_buf_text(&b),
+                ",\"power\":\"ON\",\"linked\":true,\"auto_on\":\"OFF\",\"auto_off\":\"ON\","
+                "\"delay\":240,\"off_at\":null"));
+  sp211_buf_free(&b);
+  p.auto_off = false;
+  sp211_state_power(&b, &p, false);
+  CHECK(strstr(sp211_buf_text(&b), "\"auto_off\":\"OFF\"") &&
+        strstr(sp211_buf_text(&b), "\"off_at\":null"));
+  sp211_buf_free(&b);
+}
+
 static void test_power(void) {
   sp211_power p;
   time_t t = 1000000;
@@ -292,6 +445,111 @@ static void test_broker(void) {
   CHECK(sp211_parse_bool("2", 0) == -1);
 }
 
+/* Values as systemd hands them over from /etc/default/sp211-printer-app: it
+ * removes the quotes and the spaces around a value, and takes a comment at the
+ * end of a line as part of it (docs/MQTT.md, The settings file). */
+static int broker_error(const char *host, const char *port, const char *tls, const char *want) {
+  sp211_broker b;
+  const char *err = NULL;
+  return sp211_parse_broker(host, port, tls, &b, &err) == -1 && err && !strcmp(err, want);
+}
+
+static void test_config_values(void) {
+  sp211_broker b;
+  const char *err = "stale";
+
+  /* every spelling of yes and no, in any case, spaces around */
+  static const char *const yes[] = {"yes", "YES", "true", "True", "on", "On", "1", " yes\t", "on\r\n"};
+  static const char *const no[] = {"no", "No", "false", "FALSE", "off", "OFF", "0", "  0 "};
+  for (size_t i = 0; i < sizeof yes / sizeof yes[0]; i++) CHECK(sp211_parse_bool(yes[i], 0) == 1);
+  for (size_t i = 0; i < sizeof no / sizeof no[0]; i++) CHECK(sp211_parse_bool(no[i], 1) == 0);
+  CHECK(sp211_parse_bool("", 1) == 1 && sp211_parse_bool("", 0) == 0);
+
+  /* invalid: other words, quotes left in the value, comment on the line */
+  static const char *const bad[] = {"y",     "n",    "yess",          "10", "-1", "oui",
+                                    "\"yes\"", "'no'", "yes # comment", "yes yes yes yes yes"};
+  for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) CHECK(sp211_parse_bool(bad[i], 1) == -1);
+
+  /* success clears the error; with MQTT off the other settings are not read */
+  CHECK(sp211_parse_broker("ha.lan", NULL, NULL, &b, &err) == 1 && !err);
+  CHECK(sp211_parse_broker("", "port", "maybe", &b, &err) == 0 && !err);
+  CHECK(sp211_parse_broker("ha.lan", "  ", "  ", &b, &err) == 1 && b.port == 1883 && !b.tls);
+
+  /* the limits of a port */
+  CHECK(sp211_parse_broker("ha.lan", "1", NULL, &b, &err) == 1 && b.port == 1);
+  CHECK(sp211_parse_broker("ha.lan", "65535", NULL, &b, &err) == 1 && b.port == 65535);
+  CHECK(sp211_parse_broker("ha.lan:65535", NULL, NULL, &b, &err) == 1 && b.port == 65535);
+  CHECK(broker_error("ha.lan:65536", NULL, NULL, "MQTT_HOST"));
+  CHECK(broker_error("ha.lan", "0", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "-1", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "+1883", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "1883x", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "99999999999999999999", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "1883 # broker", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "'1883'", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", "\"1883\"", NULL, "MQTT_PORT"));
+  CHECK(broker_error("ha.lan", NULL, "'yes'", "MQTT_TLS"));
+  CHECK(broker_error("ha.lan:1884 # broker", NULL, NULL, "MQTT_HOST"));
+
+  /* brackets */
+  CHECK(broker_error("[]", NULL, NULL, "MQTT_HOST"));
+  CHECK(broker_error("[fd00::5]1884", NULL, NULL, "MQTT_HOST"));
+  CHECK(broker_error("[fd00::5]:", NULL, NULL, "MQTT_HOST"));
+
+  /* a name too long for the field is cut, without overflowing it */
+  char host[400];
+  memset(host, 'a', sizeof host - 1);
+  host[sizeof host - 1] = '\0';
+  CHECK(sp211_parse_broker(host, NULL, NULL, &b, &err) == 1 && strlen(b.host) == sizeof b.host - 1);
+}
+
+/* The settings file the package installs: everything commented out, every
+ * setting there once, and the example values accepted once their "#" is
+ * removed. Run from the top of the repository, as "make test" does. */
+static void test_default_file(void) {
+  static const char *const names[] = {
+      "MQTT_HOST",         "MQTT_PORT",      "MQTT_USERNAME",         "MQTT_PASSWORD",
+      "MQTT_TLS",          "MQTT_CA_FILE",   "MQTT_CERT_FILE",        "MQTT_KEY_FILE",
+      "MQTT_TLS_INSECURE", "MQTT_DISCOVERY", "MQTT_DISCOVERY_PREFIX", "MQTT_TOPIC",
+      "PRINTER_WEB_URL"};
+  enum { N = sizeof names / sizeof names[0] };
+  char value[N][128] = {{0}};
+  int seen[N] = {0};
+
+  FILE *f = fopen("packaging/sp211-printer-app.default", "r");
+  CHECK(f != NULL);
+  if (!f) return;
+  char line[256];
+  while (fgets(line, sizeof line, f)) {
+    line[strcspn(line, "\r\n")] = '\0';
+    CHECK(!line[0] || line[0] == '#'); /* no setting is active */
+    if (line[0] != '#') continue;
+    size_t n = strspn(line + 1, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_");
+    if (!n || line[1 + n] != '=') continue; /* prose */
+    size_t i = 0;
+    while (i < N && (strlen(names[i]) != n || strncmp(line + 1, names[i], n))) i++;
+    CHECK(i < N); /* a known setting */
+    if (i == N) continue;
+    seen[i]++;
+    snprintf(value[i], sizeof value[i], "%s", line + 2 + n);
+    /* the format the file states: no space around "=", no comment after */
+    CHECK(value[i][0] && !strchr(value[i], ' ') && !strchr(value[i], '#'));
+  }
+  fclose(f);
+  for (int i = 0; i < N; i++) CHECK(seen[i] == 1);
+
+  /* the example values; indexes as in names[] */
+  sp211_broker b;
+  const char *err;
+  CHECK(sp211_parse_broker(value[0], value[1], NULL, &b, &err) == 1);
+  CHECK(!strcmp(b.host, value[0]) && b.port == SP211_MQTT_PORT && !b.tls);
+  CHECK(sp211_parse_broker(value[0], NULL, value[4], &b, &err) == 1);
+  CHECK(b.tls && b.port == SP211_MQTTS_PORT);
+  /* the examples of MQTT_TLS_INSECURE and MQTT_DISCOVERY are their defaults */
+  CHECK(sp211_parse_bool(value[8], -1) == 0);
+  CHECK(sp211_parse_bool(value[9], -1) == 1);
+}
+
 int main(void) {
   from_hex(IDLE_HEX, IDLE, 64);
   from_hex(PAPER_OUT_HEX, PAPER_OUT, 64);
@@ -301,8 +559,13 @@ int main(void) {
   test_uri_serial();
   test_internal_page();
   test_json();
+  test_json_strings();
+  test_json_objects();
+  test_state();
   test_power();
   test_broker();
+  test_config_values();
+  test_default_file();
   printf("%d checks, %d failures\n", checks, failures);
   return failures ? 1 : 0;
 }

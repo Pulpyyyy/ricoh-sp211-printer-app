@@ -16,10 +16,10 @@
 JBIG    = third_party/jbigkit
 ENCODER = src/lilo2.c $(JBIG)/jbig.c $(JBIG)/jbig_ar.c
 STATUS  = src/sp211_status.c src/sp211_usb.c src/sp211_power.c src/sp211_json.c \
-          src/sp211_config.c
+          src/sp211_config.c src/sp211_state.c
 HEADERS = src/lilo2.h src/dither_matrix.h src/sp211_status.h src/sp211_usb.h \
           src/sp211_power.h src/sp211_json.h src/sp211_app.h src/sp211_mqtt.h \
-          src/sp211_config.h src/sp211_usbdev.h
+          src/sp211_config.h src/sp211_usbdev.h src/sp211_state.h
 
 CFLAGS  ?= -O2 -Wall -Wextra
 
