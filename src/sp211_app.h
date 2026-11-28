@@ -10,7 +10,11 @@
 #include <stdint.h>
 #include <time.h>
 
+/* The version announced over IPP and MQTT. The Makefile sets it (VERSION);
+ * this is the fallback for a build without it. */
+#ifndef SP211_APP_VERSION
 #define SP211_APP_VERSION "0.2"
+#endif
 
 typedef struct {
   bool read;            /* at least one read was attempted */
