@@ -58,6 +58,10 @@ sudo sp211-printer-app add -d SP211 -m ricoh_sp211 \
      -v "$(sp211-printer-app devices | grep -m1 -o 'usb://RICOH[^ ]*')"
 ```
 
+A package reports its own version over IPP and MQTT; a build from source
+reports `0.0.0~dev`, unless built with `make VERSION=1.2.3` (after
+`make clean` if already built).
+
 The service listens on the IPP port, 631, and announces the printer on the
 network (DNS-SD), so clients find "SP211" by themselves. Its data (queue,
 settings) is kept in `/var/lib/sp211-printer-app`, and its web interface is

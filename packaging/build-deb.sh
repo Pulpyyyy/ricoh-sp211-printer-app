@@ -21,10 +21,11 @@ OUT=$TOP/build/${NAME}_${VERSION}_${ARCH}.deb
 
 cd "$TOP"
 make clean
-make build/sp211-printer-app MQTT=yes
+make build/sp211-printer-app MQTT=yes VERSION="$VERSION"
 make test
 rm -rf "$STAGE"
-make install DESTDIR="$STAGE" PREFIX=/usr SYSTEMD_UNITDIR=/usr/lib/systemd/system MQTT=yes
+make install DESTDIR="$STAGE" PREFIX=/usr SYSTEMD_UNITDIR=/usr/lib/systemd/system MQTT=yes \
+  VERSION="$VERSION"
 
 # Home Assistant blueprint, for the plug
 install -d "$STAGE/usr/share/$NAME"
