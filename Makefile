@@ -21,6 +21,10 @@ HEADERS = src/lilo2.h src/dither_matrix.h src/sp211_status.h src/sp211_usb.h \
 
 CFLAGS  ?= -O2 -Wall -Wextra
 
+# The version announced over IPP and MQTT; packaging/build-deb.sh passes the
+# package's. Changing it does not by itself rebuild: run make clean first.
+VERSION ?= 0.0.0~dev
+
 PAPPL_CFLAGS = $(shell pkg-config --cflags pappl 2>/dev/null)
 PAPPL_LIBS   = $(shell pkg-config --libs pappl 2>/dev/null || echo -lpappl -lcups)
 USB_CFLAGS   = -DHAVE_LIBUSB $(shell pkg-config --cflags libusb-1.0 2>/dev/null)
@@ -39,7 +43,8 @@ APP_SRC = src/sp211-printer-app.c src/sp211_mqtt.c src/sp211_usbdev.c
 
 build/sp211-printer-app: $(APP_SRC) $(ENCODER) $(STATUS) $(HEADERS)
 	mkdir -p build
-	$(CC) $(CFLAGS) -Isrc -I$(JBIG) $(PAPPL_CFLAGS) $(USB_CFLAGS) $(MQTT_CFLAGS) -o $@ \
+	$(CC) $(CFLAGS) -Isrc -I$(JBIG) $(PAPPL_CFLAGS) $(USB_CFLAGS) $(MQTT_CFLAGS) \
+	    -DSP211_APP_VERSION='"$(VERSION)"' -o $@ \
 	    $(APP_SRC) $(ENCODER) $(STATUS) \
 	    $(PAPPL_LIBS) $(USB_LIBS) $(MQTT_LIBS) -lpthread
 
