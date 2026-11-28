@@ -31,6 +31,7 @@ void sp211_mqtt_start(pappl_system_t *system, const char *settings_file) {
 #include "sp211_config.h"
 #include "sp211_json.h"
 #include "sp211_power.h"
+#include "sp211_state.h"
 #include "sp211_usb.h"
 
 #define DRIVER_NAME "ricoh_sp211"
@@ -219,12 +220,6 @@ static const struct {
   {PAPPL_PREASON_OFFLINE, "offline-report"},
 };
 
-static void iso_time(time_t t, char *buf, size_t size) {
-  struct tm tm;
-  gmtime_r(&t, &tm);
-  strftime(buf, size, "%Y-%m-%dT%H:%M:%S+00:00", &tm);
-}
-
 /* Gathers the printer's state, runs the power decisions, and writes the
  * retained state message (see docs/MQTT.md). */
 static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
@@ -289,23 +284,13 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
   }
   sp211_buf_cat(&r, "]");
 
-  const char *toner_state = st.toner_percent < 0 ? "unknown"
-                            : st.toner_percent == 0 ? "empty"
-                            : st.toner_percent <= SP211_TONER_LOW_PERCENT ? "low"
-                                                                         : "ok";
   char t[40];
   sp211_buf_printf(b, "{\"state\":\"%s\",\"reasons\":%s,\"problem\":%s,\"message\":\"\"", state,
                    sp211_buf_text(&r), problem ? "true" : "false");
   sp211_buf_free(&r);
   sp211_buf_printf(b, ",\"accepting\":%s,\"active\":%d,\"online\":%s", accepting ? "true" : "false",
                    active, online ? "true" : "false");
-  if (st.toner_percent >= 0) sp211_buf_printf(b, ",\"toner\":%d", st.toner_percent);
-  else sp211_buf_cat(b, ",\"toner\":null");
-  sp211_buf_printf(b, ",\"toner_state\":\"%s\"", toner_state);
-  if (st.have_pages) sp211_buf_printf(b, ",\"pages_total\":%u", (unsigned)st.pages);
-  else sp211_buf_cat(b, ",\"pages_total\":null");
-  if (st.have_misfeeds) sp211_buf_printf(b, ",\"misfeeds\":%u", (unsigned)st.misfeeds);
-  else sp211_buf_cat(b, ",\"misfeeds\":null");
+  sp211_state_supplies(b, &st);
 
   sp211_buf_cat(b, ",\"job\":");
   if (job.id) {
@@ -322,7 +307,7 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
     sp211_buf_printf(b, ",\"state\":\"%s\",\"pages\":%d,\"time\":", job_state_keyword(last.state),
                      last.pages);
     if (last.completed > 0) {
-      iso_time(last.completed, t, sizeof t);
+      sp211_state_time(last.completed, t, sizeof t);
       sp211_buf_printf(b, "\"%s\"}", t);
     } else {
       sp211_buf_cat(b, "null}");
@@ -331,17 +316,7 @@ static void build_state(mqtt_t *m, pappl_printer_t *printer, sp211_buf *b) {
     sp211_buf_cat(b, "null");
   }
 
-  time_t off_at = sp211_power_off_at(&m->power, needs_power);
-  sp211_buf_printf(b, ",\"power\":\"%s\",\"linked\":%s,\"auto_on\":\"%s\",\"auto_off\":\"%s\",\"delay\":%d,\"off_at\":",
-                   m->power.on ? "ON" : "OFF", m->power.linked ? "true" : "false",
-                   m->power.auto_on ? "ON" : "OFF", m->power.auto_off ? "ON" : "OFF",
-                   m->power.delay_min);
-  if (off_at) {
-    iso_time(off_at, t, sizeof t);
-    sp211_buf_printf(b, "\"%s\"", t);
-  } else {
-    sp211_buf_cat(b, "null");
-  }
+  sp211_state_power(b, &m->power, needs_power);
   sp211_buf_cat(b, ",\"firmware\":");
   sp211_buf_json_string(b, st.firmware[0] ? st.firmware : NULL);
   sp211_buf_cat(b, "}");
