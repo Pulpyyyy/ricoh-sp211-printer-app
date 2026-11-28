@@ -4,6 +4,7 @@
 #
 #   make            build sp211-printer-app (and the stream checker)
 #   make test       unit tests, no printer needed
+#   make references rewrite the encoder test references (tests/data/README.md)
 #   sudo make install
 #
 # Needs PAPPL (Debian/Ubuntu: libpappl-dev) and libusb-1.0 (libusb-1.0-0-dev);
@@ -53,9 +54,20 @@ build/test_status: tests/test_status.c $(STATUS) $(HEADERS)
 	mkdir -p build
 	$(CC) $(CFLAGS) -Isrc -o $@ tests/test_status.c $(STATUS)
 
-test: build/test_status
+# Regression test of the print encoder: test pages, decoded by lilo2check and
+# compared with the references in tests/data/.
+build/test_encoder: tests/test_encoder.c $(ENCODER) src/lilo2.h src/dither_matrix.h
+	mkdir -p build
+	$(CC) $(CFLAGS) -Isrc -I$(JBIG) -o $@ tests/test_encoder.c $(ENCODER)
+
+test: build/test_status build/test_encoder build/lilo2check
 	./build/test_status
 	python3 tests/test_gdi_status.py
+	python3 tests/test_encoder.py
+
+# Only after an intended change of the encoder's output.
+references: build/test_encoder build/lilo2check
+	python3 tests/test_encoder.py --update
 
 # Installs the Printer Application and its systemd service (not started).
 PREFIX ?= /usr/local
@@ -74,4 +86,4 @@ install: build/sp211-printer-app
 clean:
 	rm -rf build
 
-.PHONY: all test install clean
+.PHONY: all test references install clean
