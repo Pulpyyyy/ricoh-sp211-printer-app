@@ -2,7 +2,8 @@
 #
 # IPP Everywhere Printer Application for Ricoh SP 211 class GDI printers.
 #
-#   make            build sp211-printer-app (and the stream checker)
+#   make            build sp211-printer-app (and the stream checker);
+#                   VERSION=x.y.z sets the version it announces
 #   make test       unit tests, no printer needed
 #   sudo make install
 #
@@ -20,6 +21,12 @@ HEADERS = src/lilo2.h src/dither_matrix.h src/sp211_status.h src/sp211_usb.h \
           src/sp211_config.h src/sp211_usbdev.h
 
 CFLAGS  ?= -O2 -Wall -Wextra
+
+# The version the application announces over IPP and MQTT. The package build
+# passes its own (packaging/build-deb.sh). make does not see a change of
+# VERSION alone: run "make clean" first.
+VERSION ?= 0.2
+VERSION_CFLAGS = -DSP211_APP_VERSION='"$(VERSION)"'
 
 PAPPL_CFLAGS = $(shell pkg-config --cflags pappl 2>/dev/null)
 PAPPL_LIBS   = $(shell pkg-config --libs pappl 2>/dev/null || echo -lpappl -lcups)
@@ -39,7 +46,8 @@ APP_SRC = src/sp211-printer-app.c src/sp211_mqtt.c src/sp211_usbdev.c
 
 build/sp211-printer-app: $(APP_SRC) $(ENCODER) $(STATUS) $(HEADERS)
 	mkdir -p build
-	$(CC) $(CFLAGS) -Isrc -I$(JBIG) $(PAPPL_CFLAGS) $(USB_CFLAGS) $(MQTT_CFLAGS) -o $@ \
+	$(CC) $(CFLAGS) $(VERSION_CFLAGS) -Isrc -I$(JBIG) $(PAPPL_CFLAGS) $(USB_CFLAGS) \
+	    $(MQTT_CFLAGS) -o $@ \
 	    $(APP_SRC) $(ENCODER) $(STATUS) \
 	    $(PAPPL_LIBS) $(USB_LIBS) $(MQTT_LIBS) -lpthread
 
