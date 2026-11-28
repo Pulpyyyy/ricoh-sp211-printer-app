@@ -190,6 +190,8 @@ including in its own messages; printing is not affected.
 
 ## Documentation
 
+- [tests/data/README.md](tests/data/README.md): the regression test of the
+  print encoder (part of `make test`) and how to write its references.
 - [docs/STATUS_PROTOCOL.md](docs/STATUS_PROTOCOL.md): the status packet, the
   counter registers, the printer's job log, and what is known not to work,
   including the zero-length transfer above.
