@@ -124,8 +124,7 @@ MQTT integration, with:
   [`homeassistant/blueprints/sp211_power.yaml`](homeassistant/blueprints/sp211_power.yaml)
   links it to any plug in two fields.
 
-See [docs/MQTT.md](docs/MQTT.md). The
-[CUPS card](https://github.com/Pulpyyyy/cupscard) shows all of it on a
+See [docs/MQTT.md](docs/MQTT.md). The CUPS card shows all of it on a
 dashboard.
 
 ## Status
@@ -144,7 +143,7 @@ Tested on one printer: Ricoh SP 211, firmware V1.06, Debian 13, PAPPL 1.3.1.
 | Queue stopped while the printer cannot be reached, resumed when it answers | verified: stopped about 30 s after the printer went off, resumed when it answered again |
 | Page counter as `printer-impressions-completed` | verified |
 | MQTT: device, jobs, counters | verified: device and entities in Home Assistant, last job, page counter, misfeeds |
-| MQTT: test and maintenance pages | verified: both printed on request, printer on; a request while it is off (switches it on) not tested yet |
+| MQTT: test and maintenance pages | verified: both printed on request, printer on. Request while the printer is off: commit 3674180 implements waiting for it and waking it (auto power on); not yet tried on the physical printer |
 | MQTT: auto power on and off through the blueprint | verified: auto power off after the delay; a job sent from Windows with the printer off switched it on and printed, 20 s after it was sent |
 | Out of paper | not yet: the printer only reports it during a job |
 | 1200×600 dpi, manual duplex | not supported yet |
